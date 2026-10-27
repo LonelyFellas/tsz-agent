@@ -1,0 +1,24 @@
+# Invoke with: docker compose --env-file .env -f deploy/compose.yaml up -d
+# Existing independent Agent database must be migrated before starting these services.
+services:
+  api:
+    image: ${TSZ_AGENT_IMAGE:?Set an immutable image tag}
+    restart: unless-stopped
+    env_file: ../.env
+    ports:
+      - "127.0.0.1:8390:8390"
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+  worker:
+    image: ${TSZ_AGENT_IMAGE:?Set an immutable image tag}
+    command: [python, -m, tsz_agent.worker]
+    restart: unless-stopped
+    env_file: ../.env
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m

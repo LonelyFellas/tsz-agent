@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "id": "begin-source-boundary",
+      "label_source": "development_fixture_not_human_gold",
+      "context": {
+        "contract_version": 1,
+        "external_request_id": "00000000-0000-0000-0000-0000000003e7",
+        "target": {
+          "candidate_ref": "candidate_1",
+          "source": {
+            "entry_id": "00000000-0000-0000-0000-000000000001",
+            "publication_id": "00000000-0000-0000-0000-000000000065",
+            "pos_id": "00000000-0000-0000-0000-0000000000c9",
+            "sense_id": "00000000-0000-0000-0000-00000000012d",
+            "definition_id": "00000000-0000-0000-0000-000000000191",
+            "form_id": "00000000-0000-0000-0000-0000000001f5"
+          },
+          "content_fingerprint": "0000000000000000000000000000000000000000000000000000000000000001",
+          "spelling": "begin",
+          "part_of_speech": "verb",
+          "level": "A1",
+          "definition": "开始",
+          "other_definitions": [],
+          "accepted_spellings": [],
+          "answer_profile": "BrE",
+          "form_type": "base",
+          "teaching_eligible": true
+        },
+        "question_level": "A1",
+        "answer_profile": "BrE"
+      },
+      "candidates": [
+        {
+          "candidate_ref": "candidate_2",
+          "source": {
+            "entry_id": "00000000-0000-0000-0000-000000000002",
+            "publication_id": "00000000-0000-0000-0000-000000000066",
+            "pos_id": "00000000-0000-0000-0000-0000000000ca",
+            "sense_id": "00000000-0000-0000-0000-00000000012e",
+            "definition_id": "00000000-0000-0000-0000-000000000192",
+            "form_id": "00000000-0000-0000-0000-0000000001f6"
+          },
+          "content_fingerprint": "0000000000000000000000000000000000000000000000000000000000000002",
+          "spelling": "finish",
+          "part_of_speech": "verb",
+          "level": "A1",
+          "definition": "完成",
+          "other_definitions": [],
+          "accepted_spellings": [],
+          "answer_profile": "BrE",
+          "form_type": "base",
+          "teaching_eligible": true
+        },
+        {
+          "candidate_ref": "candidate_3",
+          "source": {
+            "entry_id": "00000000-0000-0000-0000-000000000003",
+            "publication_id": "00000000-0000-0000-0000-000000000067",
+            "pos_id": "00000000-0000-0000-0000-0000000000cb",
+            "sense_id": "00000000-0000-0000-0000-00000000012f",
+            "definition_id": "00000000-0000-0000-0000-000000000193",
+            "form_id": "00000000-0000-0000-0000-0000000001f7"
+          },
+          "content_fingerprint": "0000000000000000000000000000000000000000000000000000000000000003",
+          "spelling": "wait",
+          "part_of_speech": "verb",
+          "level": "A1",
+          "definition": "等待",
+          "other_definitions": [],
+          "accepted_spellings": [],
+          "answer_profile": "BrE",
+          "form_type": "base",
+          "teaching_eligible": true
+        },
+        {
+          "candidate_ref": "candidate_4",
+          "source": {
+            "entry_id": "00000000-0000-0000-0000-000000000004",
+            "publication_id": "00000000-0000-0000-0000-000000000068",
+            "pos_id": "00000000-0000-0000-0000-0000000000cc",
+            "sense_id": "00000000-0000-0000-0000-000000000130",
+            "definition_id": "00000000-0000-0000-0000-000000000194",
+            "form_id": "00000000-0000-0000-0000-0000000001f8"
+          },
+          "content_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+          "spelling": "stop",
+          "part_of_speech": "verb",
+          "level": "A1",
+          "definition": "停止",
+          "other_definitions": [],
+          "accepted_spellings": [],
+          "answer_profile": "BrE",
+          "form_type": "base",
+          "teaching_eligible": true
+        },
+        {
+          "candidate_ref": "candidate_5",
+          "source": {
+            "entry_id": "00000000-0000-0000-0000-000000000005",
+            "publication_id": "00000000-0000-0000-0000-000000000069",
+            "pos_id": "00000000-0000-0000-0000-0000000000cd",
+            "sense_id": "00000000-0000-0000-0000-000000000131",
+            "definition_id": "00000000-0000-0000-0000-000000000195",
+            "form_id": "00000000-0000-0000-0000-0000000001f9"
+          },
+          "content_fingerprint": "0000000000000000000000000000000000000000000000000000000000000005",
+          "spelling": "start",
+          "part_of_speech": "verb",
+          "level": "A1",
+          "definition": "开始",
+          "other_definitions": [],
+          "accepted_spellings": [],
+          "answer_profile": "BrE",
+          "form_type": "base",
+          "teaching_eligible": true
+        }
+      ],
+      "forbidden_candidate_refs": [
+        "candidate_5"
+      ],
+      "expect_needs_revision": null
+    }
+  ]
+}

@@ -1,0 +1,430 @@
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+    select,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from tsz_agent.clients.tsz import TaskError
+from tsz_agent.schemas import (
+    CreateRun,
+    GenerationContext,
+    ReviewEvent,
+    ReviewExample,
+    RunResult,
+    RunView,
+    Usage,
+)
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+def digest(value: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+
+class Conflict(Exception):
+    pass
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Run(Base):
+    __tablename__ = "agent_runs"
+    id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True, default=uuid4)
+    external_request_id: Mapped[UUID] = mapped_column(PGUUID, unique=True)
+    idempotency_key: Mapped[UUID] = mapped_column(PGUUID, unique=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    capability: Mapped[str] = mapped_column(String(60))
+    state: Mapped[str] = mapped_column(String(20), default="queued")
+    stage: Mapped[str] = mapped_column(String(40), default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[UUID | None] = mapped_column(PGUUID)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(60))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (Index("agent_runs_due", "state", "next_attempt_at"),)
+
+
+class FeedbackEvent(Base):
+    __tablename__ = "agent_review_events"
+    event_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True)
+    review_id: Mapped[UUID] = mapped_column(PGUUID)
+    review_revision: Mapped[int] = mapped_column(Integer)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (UniqueConstraint("review_id", "review_revision"),)
+
+
+class ModelCall(Base):
+    __tablename__ = "agent_model_calls"
+    id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(PGUUID, ForeignKey("agent_runs.id"), index=True)
+    lease_token: Mapped[UUID] = mapped_column(PGUUID)
+    reserved_output_tokens: Mapped[int] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReviewCurrent(Base):
+    __tablename__ = "agent_review_current"
+    review_id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True)
+    review_revision: Mapped[int] = mapped_column(Integer)
+    source_run_id: Mapped[UUID] = mapped_column(PGUUID, ForeignKey("agent_runs.id"))
+    active: Mapped[bool]
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+def view(run: Run) -> RunView:
+    return RunView.model_validate(
+        {
+            "id": run.id,
+            "external_request_id": run.external_request_id,
+            "capability": run.capability,
+            "state": run.state,
+            "stage": run.stage,
+            "attempts": run.attempts,
+            "error_code": run.error_code,
+            "result": run.result,
+            "usage": Usage.model_validate(run.usage),
+            "created_at": run.created_at,
+            "updated_at": run.updated_at,
+        }
+    )
+
+
+class Store:
+    def __init__(self, url: str):
+        self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+
+    async def close(self) -> None:
+        await self.engine.dispose()
+
+    async def ready(self) -> None:
+        async with self.sessions() as session:
+            # Readiness requires the schema, not only a live database socket.
+            await session.execute(select(Run).limit(1))
+            revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+            if revision != "0002":
+                raise RuntimeError("unsupported_database_revision")
+
+    async def create(self, body: CreateRun, key: UUID) -> RunView:
+        payload_hash = digest(body.model_dump(mode="json"))
+        async with self.sessions.begin() as session:
+            # Serialize both identity axes, including concurrent first inserts.
+            for identity in sorted([f"run-key:{key}", f"request:{body.external_request_id}"]):
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": identity},
+                )
+            existing = (
+                await session.scalars(
+                    select(Run).where(
+                        (Run.idempotency_key == key)
+                        | (Run.external_request_id == body.external_request_id)
+                    )
+                )
+            ).all()
+            if existing:
+                if len(existing) != 1 or existing[0].request_hash != payload_hash:
+                    raise Conflict("idempotency_conflict")
+                return view(existing[0])
+            run = Run(
+                external_request_id=body.external_request_id,
+                idempotency_key=key,
+                request_hash=payload_hash,
+                capability=body.capability,
+            )
+            session.add(run)
+            await session.flush()
+            return view(run)
+
+    async def get(self, run_id: UUID) -> RunView | None:
+        async with self.sessions() as session:
+            run = await session.get(Run, run_id)
+            return view(run) if run else None
+
+    async def cancel(self, run_id: UUID) -> RunView | None:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if run is None:
+                return None
+            if run.state not in {"succeeded", "failed", "cancelled"}:
+                run.state = "cancelled"
+                run.stage = "cancelled"
+                run.lease_token = None
+                run.lease_until = None
+                run.updated_at = now()
+            return view(run)
+
+    async def claim(self, lease_seconds: int, max_attempts: int) -> Run | None:
+        async with self.sessions.begin() as session:
+            # Finish exhausted crashed jobs before searching for runnable work.
+            await session.execute(
+                text("""UPDATE agent_runs SET state='failed', stage='failed',
+                error_code='lease_expired', lease_token=NULL, lease_until=NULL, updated_at=now()
+                WHERE state='running' AND lease_until<=now() AND attempts>=:limit"""),
+                {"limit": max_attempts},
+            )
+            run = await session.scalar(
+                select(Run)
+                .where(
+                    ((Run.state == "queued") & (Run.next_attempt_at <= func.now()))
+                    | ((Run.state == "running") & (Run.lease_until <= func.now()))
+                )
+                .where(Run.attempts < max_attempts)
+                .order_by(Run.created_at, Run.id)
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            )
+            if run is None:
+                return None
+            run.state = "running"
+            run.lease_token = uuid4()
+            run.lease_until = now() + timedelta(seconds=lease_seconds)
+            run.attempts += 1
+            run.error_code = None
+            run.updated_at = now()
+            return run
+
+    async def renew(self, run_id: UUID, token: UUID, lease_seconds: int) -> bool:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if not self.owned(run, token):
+                return False
+            assert run is not None
+            run.lease_until = now() + timedelta(seconds=lease_seconds)
+            return True
+
+    @staticmethod
+    def owned(run: Run | None, token: UUID) -> bool:
+        return bool(
+            run
+            and run.state == "running"
+            and run.lease_token == token
+            and run.lease_until
+            and run.lease_until > now()
+        )
+
+    async def checkpoint(
+        self, run_id: UUID, token: UUID, stage: str, checkpoint: dict[str, Any]
+    ) -> bool:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if not self.owned(run, token):
+                return False
+            assert run is not None
+            run.stage, run.checkpoint = stage, checkpoint
+            run.updated_at = now()
+            return True
+
+    async def complete(self, run_id: UUID, token: UUID, result: RunResult) -> bool:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if not self.owned(run, token):
+                return False
+            assert run is not None
+            run.state, run.stage = "succeeded", "completed"
+            run.result = result.model_dump(mode="json")
+            run.lease_token, run.lease_until, run.updated_at = None, None, now()
+            return True
+
+    async def fail(
+        self, run_id: UUID, token: UUID, code: str, retryable: bool, max_attempts: int
+    ) -> None:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if not self.owned(run, token):
+                return
+            assert run is not None
+            run.state = "queued" if retryable and run.attempts < max_attempts else "failed"
+            run.error_code = code
+            run.next_attempt_at = now() + timedelta(seconds=10 * 2 ** (run.attempts - 1))
+            run.lease_token, run.lease_until, run.updated_at = None, None, now()
+
+    async def reserve_model_call(
+        self,
+        run_id: UUID,
+        token: UUID,
+        call_id: UUID,
+        requested_output: int,
+        request_limit: int,
+        output_limit: int,
+    ) -> tuple[int, Usage]:
+        async with self.sessions.begin() as session:
+            run = await session.get(Run, run_id, with_for_update=True)
+            if not self.owned(run, token):
+                raise TaskError("lease_lost")
+            assert run is not None
+            usage = Usage.model_validate(run.usage)
+            pending = await session.scalar(
+                select(func.coalesce(func.sum(ModelCall.reserved_output_tokens), 0)).where(
+                    ModelCall.run_id == run_id, ModelCall.recorded_at.is_(None)
+                )
+            )
+            remaining = output_limit - usage.output_tokens - int(pending or 0)
+            if usage.requests >= request_limit or remaining <= 0 or requested_output <= 0:
+                raise TaskError("model_budget_exceeded")
+            allowance = min(requested_output, remaining)
+            session.add(
+                ModelCall(
+                    id=call_id, run_id=run_id, lease_token=token, reserved_output_tokens=allowance
+                )
+            )
+            usage.requests += 1
+            run.usage, run.updated_at = usage.model_dump(mode="json"), now()
+            return allowance, usage
+
+    async def record_model_usage(
+        self, run_id: UUID, call_id: UUID, input_tokens: int, output_tokens: int
+    ) -> Usage:
+        if min(input_tokens, output_tokens) < 0:
+            raise TaskError("usage_receipt_invalid")
+        async with self.sessions.begin() as session:
+            # Accounting must survive cancellation and lease transfer. Lock order matches reserve.
+            run = await session.get(Run, run_id, with_for_update=True)
+            call = await session.get(ModelCall, call_id, with_for_update=True)
+            if run is None or call is None or call.run_id != run_id:
+                raise TaskError("usage_receipt_invalid")
+            usage = Usage.model_validate(run.usage)
+            if call.recorded_at is not None:
+                if (call.input_tokens, call.output_tokens) != (input_tokens, output_tokens):
+                    raise TaskError("usage_receipt_conflict")
+                return usage
+            call.input_tokens, call.output_tokens = input_tokens, output_tokens
+            call.recorded_at = now()
+            usage.input_tokens += input_tokens
+            usage.output_tokens += output_tokens
+            run.usage, run.updated_at = usage.model_dump(mode="json"), now()
+            return usage
+
+    async def feedback(self, event: ReviewEvent) -> bool:
+        body, payload_hash = event.model_dump(mode="json"), digest(event.model_dump(mode="json"))
+        async with self.sessions.begin() as session:
+            for identity in sorted([f"event:{event.event_id}", f"review:{event.review_id}"]):
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": identity},
+                )
+            previous = await session.get(FeedbackEvent, event.event_id)
+            if previous:
+                if previous.payload_hash != payload_hash:
+                    raise Conflict("event_id_conflict")
+                return False
+            same_revision = await session.scalar(
+                select(FeedbackEvent).where(
+                    FeedbackEvent.review_id == event.review_id,
+                    FeedbackEvent.review_revision == event.review_revision,
+                )
+            )
+            if same_revision:
+                raise Conflict("review_revision_conflict")
+            source = await session.get(Run, event.source_run_id)
+            if source is None or source.state != "succeeded" or source.result is None:
+                raise Conflict("source_run_unavailable")
+            result = RunResult.model_validate(source.result)
+            if result.question is None:
+                raise Conflict("source_run_has_no_question")
+            if event.example and event.example.target != result.question.target:
+                raise Conflict("feedback_target_mismatch")
+            current_body = dict(body)
+            if event.decision == "rejected" and event.example is None:
+                # Negative examples come from the actual rejected revision, never fabricated text.
+                current_body["example"] = ReviewExample(
+                    target=result.question.target,
+                    question_level=result.question.question_level,
+                    prompt=result.question.prompt,
+                    distractors=[
+                        o.candidate
+                        for o in result.question.options
+                        if o.option_id != result.question.correct_option_id
+                    ],
+                    lesson=event.comment or "; ".join(event.reason_codes),
+                ).model_dump(mode="json")
+            if current_body.get("example"):
+                from tsz_agent.capabilities.vocabulary_mcq.validators import valid_pool
+                from tsz_agent.clients.tsz import TaskError
+
+                example = ReviewExample.model_validate(current_body["example"])
+                example_context = GenerationContext(
+                    external_request_id=source.external_request_id,
+                    target=example.target,
+                    question_level=example.question_level,
+                    answer_profile=example.target.answer_profile,
+                )
+                # Rejected examples deliberately preserve bad distractors as negative evidence.
+                if event.decision in {"approved", "edited_and_approved"}:
+                    try:
+                        valid = valid_pool(example_context, example.distractors)
+                    except TaskError as exc:
+                        raise Conflict("feedback_source_invalid") from exc
+                    if len(valid) != 3:
+                        raise Conflict("feedback_source_invalid")
+            current = await session.get(ReviewCurrent, event.review_id)
+            if current and current.source_run_id != event.source_run_id:
+                raise Conflict("review_source_mismatch")
+            if current and current.payload["question_revision_id"] != body["question_revision_id"]:
+                raise Conflict("review_question_revision_mismatch")
+            session.add(
+                FeedbackEvent(
+                    event_id=event.event_id,
+                    review_id=event.review_id,
+                    review_revision=event.review_revision,
+                    payload_hash=payload_hash,
+                    payload=body,
+                )
+            )
+            if current and current.review_revision >= event.review_revision:
+                return False
+            if current is None:
+                current = ReviewCurrent(
+                    review_id=event.review_id, source_run_id=event.source_run_id
+                )
+                session.add(current)
+            current.review_revision, current.payload = event.review_revision, current_body
+            current.active = event.decision != "revoked"
+            current.updated_at = now()
+            return True
+
+    async def examples(self) -> list[ReviewEvent]:
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(ReviewCurrent)
+                    .where(ReviewCurrent.active)
+                    .order_by(ReviewCurrent.updated_at.desc())
+                    .limit(200)
+                )
+            ).all()
+            return [ReviewEvent.model_validate(row.payload) for row in rows]
