@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     tsz_service_token: SecretStr
     deepseek_api_key: SecretStr | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
     deepseek_model: Literal["deepseek-flash"] = "deepseek-flash"
+    opencode_server_url: AnyHttpUrl | None = None
+    opencode_server_password: SecretStr | None = None
     lease_seconds: int = Field(default=180, ge=30, le=1800)
     request_timeout_seconds: int = Field(default=90, ge=5, le=600)
     job_timeout_seconds: int = Field(default=300, ge=30, le=1800)

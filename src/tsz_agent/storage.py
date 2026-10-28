@@ -41,6 +41,7 @@ from tsz_agent.schemas import (
     ModelLedgerPage,
     ModelLedgerSummary,
     ModelPricing,
+    ModelSelection,
     ReviewEvent,
     ReviewExample,
     RunModelMetrics,
@@ -66,6 +67,12 @@ class Conflict(Exception):
 
 class Base(DeclarativeBase):
     pass
+
+
+class ModelSetting(Base):
+    __tablename__ = "agent_model_setting"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    selection: Mapped[dict[str, Any]] = mapped_column(JSONB)
 
 
 class Run(Base):
@@ -179,8 +186,25 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0004":
+            if revision != "0005":
                 raise RuntimeError("unsupported_database_revision")
+
+    async def model_selection(self) -> ModelSelection:
+        async with self.sessions() as session:
+            row = await session.get(ModelSetting, 1)
+            return ModelSelection.model_validate(row.selection) if row else ModelSelection()
+
+    async def set_model_selection(self, selection: ModelSelection) -> ModelSelection:
+        from sqlalchemy.dialects.postgresql import insert
+
+        async with self.sessions.begin() as session:
+            statement = insert(ModelSetting).values(id=1, selection=selection.model_dump())
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[ModelSetting.id], set_={"selection": selection.model_dump()}
+                )
+            )
+        return selection
 
     async def create(self, body: CreateRun, key: UUID) -> RunView:
         payload_hash = digest(body.model_dump(mode="json"))
@@ -203,7 +227,12 @@ class Store:
                 if len(existing) != 1 or existing[0].request_hash != payload_hash:
                     raise Conflict("idempotency_conflict")
                 return view(existing[0])
+            setting = await session.get(ModelSetting, 1)
+            selection = (
+                ModelSelection.model_validate(setting.selection) if setting else ModelSelection()
+            )
             run = Run(
+                usage=Usage(model=selection.usage_model()).model_dump(mode="json"),
                 external_request_id=body.external_request_id,
                 idempotency_key=key,
                 request_hash=payload_hash,
