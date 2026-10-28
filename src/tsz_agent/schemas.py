@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -249,6 +250,53 @@ class ModelLedgerPage(StrictModel):
     page: int
     page_size: int
     summary: ModelLedgerSummary
+
+
+class ModelPricing(StrictModel):
+    version: str
+    model: str
+    currency: Literal["CNY"] = "CNY"
+    tariff: Literal["peak", "off_peak"]
+    quoted_at: datetime
+    input_hit_per_million: Decimal = Field(ge=0)
+    input_miss_per_million: Decimal = Field(ge=0)
+    output_per_million: Decimal = Field(ge=0)
+
+
+class ModelCallCost(StrictModel):
+    call_id: UUID
+    estimated_cost_cny: str | None
+    pricing: ModelPricing | None
+
+
+class ModelCostTotals(StrictModel):
+    estimated_cost_cny: str | None
+    total_calls: int
+    priced_calls: int
+    unknown_calls: int
+
+
+class ModelCostPeriod(ModelCostTotals):
+    start: datetime | None
+    end: datetime
+
+
+class ModelCostOverview(StrictModel):
+    generated_at: datetime
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+    currency: Literal["CNY"] = "CNY"
+    pricing_version: str
+    pricing_valid_until: date
+    total: ModelCostPeriod
+    today: ModelCostPeriod
+    week: ModelCostPeriod
+    month: ModelCostPeriod
+
+
+class ModelCostLedgerPage(StrictModel):
+    ledger: ModelLedgerPage
+    costs: list[ModelCallCost]
+    cost_summary: ModelCostTotals
 
 
 class RunView(StrictModel):

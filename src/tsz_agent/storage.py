@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -11,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     cast,
@@ -24,14 +26,21 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from tsz_agent.clients.tsz import TaskError
+from tsz_agent.models.pricing import PRICE_VERSION, VALID_UNTIL, estimate, period_starts, quote
 from tsz_agent.schemas import (
     CreateRun,
     GenerationContext,
+    ModelCallCost,
     ModelCallMetrics,
     ModelCallView,
+    ModelCostLedgerPage,
+    ModelCostOverview,
+    ModelCostPeriod,
+    ModelCostTotals,
     ModelLedgerItem,
     ModelLedgerPage,
     ModelLedgerSummary,
+    ModelPricing,
     ReviewEvent,
     ReviewExample,
     RunModelMetrics,
@@ -103,6 +112,30 @@ class ModelCall(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metrics: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    pricing: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    estimated_cost_cny: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
+
+
+def estimate_call(call: ModelCall) -> None:
+    call.estimated_cost_cny = estimate(
+        ModelPricing.model_validate(call.pricing) if call.pricing else None,
+        call.input_tokens,
+        call.output_tokens,
+        ModelCallMetrics.model_validate(call.metrics) if call.metrics else None,
+    )
+
+
+def cost_totals(total: int, priced: int, amount: Decimal | None) -> ModelCostTotals:
+    return ModelCostTotals(
+        total_calls=total,
+        priced_calls=priced,
+        unknown_calls=total - priced,
+        estimated_cost_cny="0"
+        if total == 0
+        else format(amount, "f")
+        if amount is not None
+        else None,
+    )
 
 
 class ReviewCurrent(Base):
@@ -146,7 +179,7 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0003":
+            if revision != "0004":
                 raise RuntimeError("unsupported_database_revision")
 
     async def create(self, body: CreateRun, key: UUID) -> RunView:
@@ -275,6 +308,79 @@ class Store:
             summary=ModelLedgerSummary.model_validate(counts),
         )
 
+    async def model_cost_ledger(
+        self, page: int, page_size: int, run_id: UUID | None
+    ) -> ModelCostLedgerPage:
+        ledger = await self.model_ledger(page, page_size, run_id)
+        filters = [ModelCall.run_id == run_id] if run_id is not None else []
+        async with self.sessions() as session:
+            total, priced, amount = (
+                await session.execute(
+                    select(
+                        func.count(ModelCall.id),
+                        func.count(ModelCall.estimated_cost_cny),
+                        func.sum(ModelCall.estimated_cost_cny),
+                    ).where(*filters)
+                )
+            ).one()
+            calls = await session.scalars(
+                select(ModelCall).where(ModelCall.id.in_([item.call_id for item in ledger.items]))
+            )
+            costs = [
+                ModelCallCost(
+                    call_id=call.id,
+                    estimated_cost_cny=format(call.estimated_cost_cny, "f")
+                    if call.estimated_cost_cny is not None
+                    else None,
+                    pricing=call.pricing,
+                )
+                for call in calls
+            ]
+        return ModelCostLedgerPage(
+            ledger=ledger, costs=costs, cost_summary=cost_totals(total, priced, amount)
+        )
+
+    async def model_cost_overview(self, as_of: datetime | None = None) -> ModelCostOverview:
+        at = as_of or now()
+        starts = period_starts(at)
+        columns: list[Any] = []
+        for name, start in starts.items():
+            condition = ModelCall.created_at < at
+            if start is not None:
+                condition &= ModelCall.created_at >= start
+            columns.extend(
+                [
+                    func.count(ModelCall.id).filter(condition).label(f"{name}_total"),
+                    func.count(ModelCall.estimated_cost_cny)
+                    .filter(condition)
+                    .label(f"{name}_priced"),
+                    func.sum(ModelCall.estimated_cost_cny)
+                    .filter(condition)
+                    .label(f"{name}_amount"),
+                ]
+            )
+        async with self.sessions() as session:
+            row = (await session.execute(select(*columns))).mappings().one()
+        periods = {
+            name: ModelCostPeriod(
+                **cost_totals(
+                    row[f"{name}_total"], row[f"{name}_priced"], row[f"{name}_amount"]
+                ).model_dump(),
+                start=start,
+                end=at,
+            )
+            for name, start in starts.items()
+        }
+        return ModelCostOverview(
+            generated_at=at,
+            pricing_version=PRICE_VERSION,
+            pricing_valid_until=VALID_UNTIL,
+            total=periods["total"],
+            today=periods["today"],
+            week=periods["week"],
+            month=periods["month"],
+        )
+
     async def cancel(self, run_id: UUID) -> RunView | None:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
@@ -397,9 +503,16 @@ class Store:
             if usage.requests >= request_limit or remaining <= 0 or requested_output <= 0:
                 raise TaskError("model_budget_exceeded")
             allowance = min(requested_output, remaining)
+            reserved_at = now()
+            pricing = quote(usage.model, reserved_at)
             session.add(
                 ModelCall(
-                    id=call_id, run_id=run_id, lease_token=token, reserved_output_tokens=allowance
+                    id=call_id,
+                    run_id=run_id,
+                    lease_token=token,
+                    reserved_output_tokens=allowance,
+                    created_at=reserved_at,
+                    pricing=pricing.model_dump(mode="json") if pricing else None,
                 )
             )
             usage.requests += 1
@@ -424,6 +537,7 @@ class Store:
                 return usage
             call.input_tokens, call.output_tokens = input_tokens, output_tokens
             call.recorded_at = now()
+            estimate_call(call)
             usage.input_tokens += input_tokens
             usage.output_tokens += output_tokens
             run.usage, run.updated_at = usage.model_dump(mode="json"), now()
@@ -441,6 +555,7 @@ class Store:
             if call.metrics is not None and call.metrics != payload:
                 raise TaskError("usage_receipt_conflict")
             call.metrics = payload
+            estimate_call(call)
 
     async def feedback(self, event: ReviewEvent) -> bool:
         body, payload_hash = event.model_dump(mode="json"), digest(event.model_dump(mode="json"))
