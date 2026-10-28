@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -66,6 +67,7 @@ async def run_once(
             raise TaskError("lease_lost")
 
     async def process() -> None:
+        started_at = datetime.now(UTC)
         try:
             async with asyncio.timeout(settings.job_timeout_seconds):
                 result = await execute(
@@ -73,6 +75,8 @@ async def run_once(
                 )
                 await store.complete(run.id, token, result)
         except TaskError as exc:
+            if exc.code in {"model_unavailable", "opencode_unavailable", "model_output_invalid"}:
+                await store.invalidate_probe(previous.model, started_at, run.id)
             await store.fail(run.id, token, exc.code, exc.retryable, settings.max_attempts)
         except TimeoutError:
             await store.fail(run.id, token, "job_timeout", True, settings.max_attempts)

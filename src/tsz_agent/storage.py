@@ -20,13 +20,14 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.models.pricing import PRICE_VERSION, VALID_UNTIL, estimate, period_starts, quote
+from tsz_agent.models.probes import ModelProbe, ModelProbeReport
 from tsz_agent.schemas import (
     CreateRun,
     GenerationContext,
@@ -73,6 +74,7 @@ class ModelSetting(Base):
     __tablename__ = "agent_model_setting"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     selection: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    probe_report: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class Run(Base):
@@ -186,7 +188,7 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0005":
+            if revision != "0006":
                 raise RuntimeError("unsupported_database_revision")
 
     async def model_selection(self) -> ModelSelection:
@@ -194,10 +196,26 @@ class Store:
             row = await session.get(ModelSetting, 1)
             return ModelSelection.model_validate(row.selection) if row else ModelSelection()
 
-    async def set_model_selection(self, selection: ModelSelection) -> ModelSelection:
-        from sqlalchemy.dialects.postgresql import insert
-
+    async def set_model_selection(
+        self, selection: ModelSelection, *, probe_context: str | None = None
+    ) -> ModelSelection:
         async with self.sessions.begin() as session:
+            if probe_context is not None:
+                row = await session.get(ModelSetting, 1, with_for_update=True)
+                packet = row.probe_report if row else None
+                if packet is None or packet["context"] != probe_context:
+                    raise TaskError("model_not_verified")
+                report = ModelProbeReport.model_validate(packet["report"])
+                if not any(
+                    m.usage_model() == selection.usage_model()
+                    and m.status == "available"
+                    and m.enabled
+                    for m in report.models
+                ):
+                    raise TaskError("model_not_verified")
+                assert row is not None
+                row.selection = selection.model_dump()
+                return selection
             statement = insert(ModelSetting).values(id=1, selection=selection.model_dump())
             await session.execute(
                 statement.on_conflict_do_update(
@@ -205,6 +223,97 @@ class Store:
                 )
             )
         return selection
+
+    async def probe_packet(self) -> dict[str, Any] | None:
+        async with self.sessions() as session:
+            row = await session.get(ModelSetting, 1)
+            return row.probe_report if row else None
+
+    async def start_probe(self, packet: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        async with self.sessions.begin() as session:
+            await session.execute(
+                insert(ModelSetting)
+                .values(id=1, selection=ModelSelection().model_dump())
+                .on_conflict_do_nothing()
+            )
+            row = await session.get(ModelSetting, 1, with_for_update=True)
+            assert row is not None
+            previous = row.probe_report
+            if (
+                previous
+                and previous["report"]["state"] == "running"
+                and datetime.fromisoformat(previous["deadline"]) > now()
+            ):
+                return previous, False
+            row.probe_report = packet
+            return packet, True
+
+    async def record_probe(self, batch_id: UUID | None, model: ModelProbe) -> bool:
+        async with self.sessions.begin() as session:
+            row = await session.get(ModelSetting, 1, with_for_update=True)
+            if row is None or row.probe_report is None:
+                return False
+            packet = row.probe_report
+            report = ModelProbeReport.model_validate(packet["report"])
+            if report.batch_id != batch_id or report.state != "running":
+                return False
+            for index, existing in enumerate(report.models):
+                if existing.usage_model() == model.usage_model():
+                    report.models[index] = model
+                    row.probe_report = {**packet, "report": report.model_dump(mode="json")}
+                    return True
+            return False
+
+    async def finish_probe(self, batch_id: UUID | None, *, interrupted: bool) -> None:
+        async with self.sessions.begin() as session:
+            row = await session.get(ModelSetting, 1, with_for_update=True)
+            if row is None or row.probe_report is None:
+                return
+            packet = row.probe_report
+            report = ModelProbeReport.model_validate(packet["report"])
+            if report.batch_id != batch_id or report.state != "running":
+                return
+            report.state = "interrupted" if interrupted else "completed"
+            report.finished_at = now()
+            for model in report.models:
+                if model.status in {"checking", "unverified"}:
+                    model.status, model.error, model.checked_at = (
+                        "unavailable",
+                        "interrupted",
+                        now(),
+                    )
+            row.probe_report = {**packet, "report": report.model_dump(mode="json")}
+
+    async def invalidate_probe(
+        self, model_name: str, started_at: datetime, run_id: UUID | None
+    ) -> None:
+        async with self.sessions.begin() as session:
+            row = await session.get(ModelSetting, 1, with_for_update=True)
+            if row is None or row.probe_report is None:
+                return
+            if run_id is not None:
+                dispatched_at = await session.scalar(
+                    select(func.max(ModelCall.created_at)).where(ModelCall.run_id == run_id)
+                )
+                if dispatched_at is not None:
+                    started_at = dispatched_at
+            packet = row.probe_report
+            report = ModelProbeReport.model_validate(packet["report"])
+            for model in report.models:
+                if (
+                    model.usage_model() == model_name
+                    and model.status == "available"
+                    and model.checked_at is not None
+                    and model.checked_at <= started_at
+                ):
+                    model.status, model.error, model.checked_at = (
+                        "unavailable",
+                        "runtime_failed",
+                        now(),
+                    )
+                    model.duration_ms, model.http_status = None, None
+                    row.probe_report = {**packet, "report": report.model_dump(mode="json")}
+                    return
 
     async def create(self, body: CreateRun, key: UUID) -> RunView:
         payload_hash = digest(body.model_dump(mode="json"))
