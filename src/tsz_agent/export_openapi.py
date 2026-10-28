@@ -35,7 +35,7 @@ async def export(check: bool) -> None:
     ]
     _, source = models_json_schema(
         [(model, "validation") for model in source_models],
-        title="Proposed tsz-rust internal Agent contract v1",
+        title="Agent validation for tsz-rust internal contract v1",
     )
     for name, content in [("openapi.json", spec), ("tsz-input.schema.json", source)]:
         path = Path("docs") / name

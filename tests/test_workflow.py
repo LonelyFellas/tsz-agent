@@ -2,11 +2,19 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from conftest import candidate
 from sqlalchemy import text
 from test_validators import proposal
 
 from tsz_agent.clients.tsz import TaskError, TszClient
-from tsz_agent.schemas import CandidateSearch, CreateRun, EntriesRequest, SemanticReview, Usage
+from tsz_agent.schemas import (
+    CandidateSearch,
+    CreateRun,
+    EntriesRequest,
+    InsufficientProposal,
+    SemanticReview,
+    Usage,
+)
 from tsz_agent.worker import run_once
 
 pytestmark = pytest.mark.integration
@@ -180,3 +188,154 @@ async def test_pipeline_uses_typed_http_source_contract(store, settings, context
         await run_once(settings, store, TszClient(http), lambda _: model)
     assert (await store.get(run.id)).state == "succeeded"
     assert sum(path.endswith("/entries/batch-get") for path in calls) >= 2
+
+
+async def test_semantic_insufficiency_recalls_once_and_resumes_saved_second_draft(
+    store, settings, context, pool, monkeypatch
+):
+    extra = [candidate(i, f"word{i}", f"释义{i}") for i in range(10, 50)]
+    searches, checks, example_reads = [], [], []
+    original_examples = store.examples
+
+    async def examples(ctx):
+        example_reads.append(ctx)
+        return await original_examples(ctx)
+
+    monkeypatch.setattr(store, "examples", examples)
+
+    class RecallSource(Source):
+        async def candidates(self, request_id, ctx, exclude=None):
+            searches.append(exclude)
+            return extra if exclude else pool
+
+        async def check_sources(self, request_id, candidates):
+            assert len(candidates) <= 80
+            checks.append([c.candidate_ref for c in candidates])
+
+    class RecallModel(Model):
+        async def generate(self, data):
+            result = await super().generate(data)
+            if self.generations == 1:
+                return InsufficientProposal(reasons=["首批干扰项不合适"])
+            assert [c["candidate_ref"] for c in data["candidate_pool"]] == [
+                c.candidate_ref for c in extra
+            ]
+            assert extra[0].candidate_ref in checks[-1]
+            return result
+
+    run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
+    model = RecallModel([c.candidate_ref for c in extra[:3]], fail_review=True)
+    source = RecallSource(context, pool)
+    await run_once(settings, store, source, lambda _: model)
+    assert (await store.get(run.id)).state == "queued"
+    async with store.sessions.begin() as session:
+        await session.execute(text("UPDATE agent_runs SET next_attempt_at=now()"))
+    await run_once(settings, store, source, lambda _: model)
+    result = await store.get(run.id)
+    assert result.state == "succeeded"
+    assert result.result.question.requires_human_review
+    assert model.generations == 2 and model.reviews == 2
+    assert searches == [None, [c.candidate_ref for c in pool]]
+    assert len(example_reads) == 2  # Exactly once per generation, none on review recovery.
+
+
+@pytest.mark.parametrize("new_candidates", [False, True])
+async def test_semantic_insufficiency_stops_after_one_supplement(
+    store, settings, context, pool, new_candidates
+):
+    class RecallSource(Source):
+        calls = 0
+
+        async def candidates(self, request_id, ctx, exclude=None):
+            self.calls += 1
+            assert self.calls <= 2
+            return [candidate(10, "resume", "继续")] if exclude and new_candidates else pool
+
+    class InsufficientModel(Model):
+        async def generate(self, data):
+            self.generations += 1
+            return InsufficientProposal(reasons=["没有足够的合适干扰项"])
+
+    run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
+    model = InsufficientModel([])
+    source = RecallSource(context, pool)
+    await run_once(settings, store, source, lambda _: model)
+    result = await store.get(run.id)
+    assert result.state == "succeeded"
+    assert result.result.outcome == "insufficient_candidates"
+    assert model.generations == (2 if new_candidates else 1)
+    assert model.reviews == 0 and source.calls == 2
+
+
+@pytest.mark.parametrize(
+    "failure", ["source_changed", "authorization_revoked", "candidate_identity_conflict"]
+)
+async def test_supplement_rechecks_authority_and_all_first_page_identities(
+    store, settings, context, pool, failure
+):
+    filtered = candidate(10, "resume", "继续", teaching_eligible=False)
+
+    class RecallSource(Source):
+        supplemented = False
+
+        async def candidates(self, request_id, ctx, exclude=None):
+            if not exclude:
+                return [*pool, filtered] if failure == "candidate_identity_conflict" else pool
+            self.supplemented = True
+            if failure == "candidate_identity_conflict":
+                assert filtered.candidate_ref in exclude
+            return [filtered.model_copy(update={"teaching_eligible": True})]
+
+        async def check_sources(self, request_id, candidates):
+            if self.supplemented:
+                raise TaskError(failure)
+
+    class InsufficientModel(Model):
+        async def generate(self, data):
+            self.generations += 1
+            return InsufficientProposal(reasons=["需要其他干扰项"])
+
+    source = RecallSource(context, pool)
+    run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
+    model = InsufficientModel([])
+    await run_once(settings, store, source, lambda _: model)
+    result = await store.get(run.id)
+    assert result.state == "failed" and result.error_code == failure
+    assert result.result is None and model.generations == 1 and model.reviews == 0
+
+
+async def test_hard_shortage_already_uses_the_only_supplement(store, settings, context, pool):
+    class ShortSource(Source):
+        calls = 0
+
+        async def candidates(self, request_id, ctx, exclude=None):
+            self.calls += 1
+            assert self.calls <= 2
+            return pool[2:] if exclude else pool[:2]
+
+    class InsufficientModel(Model):
+        async def generate(self, data):
+            self.generations += 1
+            return InsufficientProposal(reasons=["干扰不足"])
+
+    run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
+    model = InsufficientModel([])
+    source = ShortSource(context, pool)
+    await run_once(settings, store, source, lambda _: model)
+    assert (await store.get(run.id)).result.outcome == "insufficient_candidates"
+    assert source.calls == 2 and model.generations == 1
+
+
+async def test_previous_workflow_checkpoint_fails_without_model_calls(
+    store, settings, context, pool
+):
+    from tsz_agent.storage import Run
+
+    run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
+    async with store.sessions.begin() as session:
+        row = await session.get(Run, run.id)
+        row.checkpoint = {"prompt_version": "mcq_zh_en_v2"}
+    model = Model([])
+    await run_once(settings, store, Source(context, pool), lambda _: model)
+    assert (await store.get(run.id)).error_code == "workflow_version_changed"
+    assert model.generations == 0 and model.reviews == 0

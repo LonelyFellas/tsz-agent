@@ -645,14 +645,29 @@ class Store:
             current.updated_at = now()
             return True
 
-    async def examples(self) -> list[ReviewEvent]:
+    async def examples(self, context: GenerationContext) -> list[ReviewEvent]:
+        example = ReviewCurrent.payload["example"]
+        target = example["target"]
         async with self.sessions() as session:
             rows = (
                 await session.scalars(
                     select(ReviewCurrent)
-                    .where(ReviewCurrent.active)
-                    .order_by(ReviewCurrent.updated_at.desc())
-                    .limit(200)
+                    .where(
+                        ReviewCurrent.active,
+                        ReviewCurrent.payload["capability"].astext == "vocabulary_mcq_zh_en",
+                        target["part_of_speech"].astext == context.target.part_of_speech,
+                        target["answer_profile"].astext == context.answer_profile,
+                        example["question_level"].astext == context.question_level,
+                    )
+                    .order_by(
+                        (
+                            target["source"]["sense_id"].astext
+                            == str(context.target.source.sense_id)
+                        ).desc(),
+                        ReviewCurrent.updated_at.desc(),
+                        ReviewCurrent.review_id,
+                    )
+                    .limit(12)
                 )
             ).all()
             return [ReviewEvent.model_validate(row.payload) for row in rows]

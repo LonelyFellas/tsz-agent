@@ -60,7 +60,9 @@ async def run_once(
     async def process() -> None:
         try:
             async with asyncio.timeout(settings.job_timeout_seconds):
-                result = await execute(run, store, tsz, get_model, save)
+                result = await execute(
+                    run, store, tsz, get_model, save, request_limit=settings.model_request_limit
+                )
                 await store.complete(run.id, token, result)
         except TaskError as exc:
             await store.fail(run.id, token, exc.code, exc.retryable, settings.max_attempts)

@@ -213,7 +213,7 @@ async def test_optional_example_denied_but_current_context_is_valid(context, poo
     )
 
     class Examples:
-        async def examples(self):
+        async def examples(self, context):
             return [event]
 
     class Source:
@@ -246,7 +246,7 @@ async def test_example_denial_does_not_hide_actual_context_failure(context, pool
     )
 
     class Examples:
-        async def examples(self):
+        async def examples(self, context):
             return [event]
 
     class Source:

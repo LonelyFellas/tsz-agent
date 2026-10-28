@@ -156,3 +156,64 @@ async def test_concurrent_reservations_cannot_exceed_one_remaining_request(store
         == 1
     )
     assert (await store.get(run.id)).usage.requests == 1
+
+
+@pytest.mark.parametrize("request_limit,expected_calls", [(2, 1), (4, 3)])
+async def test_recall_and_review_share_durable_budget(
+    store, settings, context, pool, request_limit, expected_calls
+):
+    from conftest import candidate
+    from test_validators import proposal
+    from test_workflow import Source
+
+    from tsz_agent.capabilities.vocabulary_mcq.workflow import execute
+    from tsz_agent.schemas import InsufficientProposal
+
+    extra = [candidate(i, f"word{i}", f"释义{i}") for i in range(10, 13)]
+
+    class RecallSource(Source):
+        async def candidates(self, request_id, ctx, exclude=None):
+            return extra if exclude else pool
+
+    calls = []
+
+    async def respond(request):
+        calls.append(json.loads(request.content))
+        if len(calls) == 1:
+            return completion(
+                {"proposal": InsufficientProposal(reasons=["干扰不足"]).model_dump(mode="json")}
+            )
+        if len(calls) == 2:
+            return completion(
+                {"proposal": proposal([c.candidate_ref for c in extra]).model_dump(mode="json")}
+            )
+        return completion()
+
+    created = await store.create(
+        CreateRun(external_request_id=context.external_request_id), uuid4()
+    )
+    run = await store.claim(60, 3)
+    budget = StoreBudget(store, run.id, run.lease_token, Usage(), request_limit, 6000)
+    model = await mocked_model(settings, respond, budget=budget)
+
+    async def save(stage, checkpoint):
+        assert await store.checkpoint(run.id, run.lease_token, stage, checkpoint)
+
+    try:
+        result = await execute(
+            run,
+            store,
+            RecallSource(context, pool),
+            lambda: model,
+            save,
+            request_limit=request_limit,
+        )
+        if request_limit == 2:
+            assert result.outcome == "insufficient_candidates"
+        else:
+            assert result.question.requires_human_review
+        assert len(calls) == expected_calls
+        assert (await store.get(created.id)).usage.requests == expected_calls
+        assert (await store.get(created.id)).usage.output_tokens == expected_calls * 20
+    finally:
+        await model.close()
