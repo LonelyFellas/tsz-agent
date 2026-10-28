@@ -15,7 +15,7 @@ from tsz_agent.schemas import (
     RunResult,
     SemanticReview,
 )
-from tsz_agent.storage import Run, Store
+from tsz_agent.storage import Run, Store, digest
 
 from .validators import selected, valid_pool
 
@@ -23,20 +23,12 @@ Save = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 async def knowledge(store: Store, tsz: TszClient, context: GenerationContext) -> list[ReviewEvent]:
-    events = await store.examples()
-    # Specific feedback first; then same part-of-speech and level, bounded context.
-    events.sort(
-        key=lambda e: (
-            e.example is None or e.example.target.source.sense_id != context.target.source.sense_id,
-            -e.review_revision,
-        )
-    )
+    # Filter/rank before limiting, including old feedback for this exact sense.
+    events = await store.examples(context)
     chosen = []
     for event in events:
         example = event.example
-        if example is None or example.target.part_of_speech != context.target.part_of_speech:
-            continue
-        if example.question_level != context.question_level:
+        if example is None:
             continue
         try:
             await tsz.check_sources(
@@ -63,6 +55,8 @@ async def execute(
     tsz: TszClient,
     model_factory: Callable[[], QuestionModel],
     save: Save,
+    *,
+    request_limit: int,
 ) -> RunResult:
     checkpoint = dict(run.checkpoint)
     if checkpoint and checkpoint.get("prompt_version") != PROMPT_VERSION:
@@ -75,29 +69,68 @@ async def execute(
 
     if "pool" not in checkpoint:
         candidates = await tsz.candidates(run.external_request_id, context)
+        searches = 1
         pool = valid_pool(context, candidates)
         if len(pool) < 3:
             extra = await tsz.candidates(
                 run.external_request_id, context, [c.candidate_ref for c in candidates]
             )
-            pool = valid_pool(context, [*candidates, *extra])
+            searches += 1
+            pool = valid_pool(context, [*candidates, *extra])[:40]
+            candidates = [*candidates, *extra]
         if len(pool) < 3:
             await tsz.check_sources(run.external_request_id, [context.target])
             return RunResult(
                 outcome="insufficient_candidates",
                 reasons=["词库内同词性、等级合适且不重复的候选不足三个"],
             )
-        examples = await knowledge(store, tsz, context)
         checkpoint.update(
             pool=[c.model_dump(mode="json") for c in pool],
-            examples=[e.model_dump(mode="json") for e in examples],
+            searches=searches,
+            candidate_hashes={
+                c.candidate_ref: digest(c.model_dump(mode="json")) for c in candidates
+            },
         )
         await save("sources_ready", checkpoint)
     pool = [Candidate.model_validate(c) for c in checkpoint["pool"]]
     await tsz.check_sources(run.external_request_id, [context.target, *pool])
 
     model = model_factory()
-    if "proposal" not in checkpoint:
+    while True:
+        if "proposal" in checkpoint:
+            raw = checkpoint["proposal"]
+            proposal = (
+                DraftProposal.model_validate(raw)
+                if raw.get("outcome") == "draft"
+                else InsufficientProposal.model_validate(raw)
+            )
+            if (
+                isinstance(proposal, DraftProposal)
+                or checkpoint["searches"] >= 2
+                or model.usage().requests + 2 > request_limit
+            ):
+                break
+            extra = await tsz.candidates(
+                run.external_request_id, context, list(checkpoint["candidate_hashes"])
+            )
+            # Check all returned identities, including candidates filtered out of the first pool.
+            for candidate in extra:
+                previous = checkpoint["candidate_hashes"].get(candidate.candidate_ref)
+                if previous is not None and previous != digest(candidate.model_dump(mode="json")):
+                    raise TaskError("candidate_identity_conflict")
+            valid_pool(context, [*pool, *extra])
+            refreshed = valid_pool(context, [*extra, *pool])[:40]
+            checkpoint["searches"] = 2
+            if len(refreshed) < 3 or not {c.candidate_ref for c in refreshed} - {
+                c.candidate_ref for c in pool
+            }:
+                await save("generated", checkpoint)
+                break
+            pool = refreshed
+            checkpoint["pool"] = [c.model_dump(mode="json") for c in pool]
+            del checkpoint["proposal"]
+            await save("sources_ready", checkpoint)
+            await tsz.check_sources(run.external_request_id, [context.target, *pool])
         # Refresh active feedback at execution time. It is not an unbounded chat history.
         examples = await knowledge(store, tsz, context)
         checkpoint["examples"] = [e.model_dump(mode="json") for e in examples]
@@ -113,12 +146,6 @@ async def execute(
             selected(context, pool, proposal)
         checkpoint["proposal"] = proposal.model_dump(mode="json")
         await save("generated", checkpoint)
-    raw_proposal = checkpoint["proposal"]
-    proposal = (
-        DraftProposal.model_validate(raw_proposal)
-        if raw_proposal.get("outcome") == "draft"
-        else InsufficientProposal.model_validate(raw_proposal)
-    )
     if isinstance(proposal, InsufficientProposal):
         await tsz.check_sources(run.external_request_id, [context.target, *pool])
         return RunResult(outcome="insufficient_candidates", reasons=proposal.reasons)
