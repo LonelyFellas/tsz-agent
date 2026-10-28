@@ -453,3 +453,34 @@ async def test_old_lease_failure_does_not_use_new_lease_dispatch_time(store, set
     await store.reserve_model_call(run.id, new.lease_token, uuid4(), 16, 4, 6000)
     await store.invalidate_probe(choice.usage_model(), started, (run.id, old.lease_token))
     assert (await service.report()).models[0].status == "available"
+
+
+async def test_model_catalog_order_does_not_invalidate_probe_context(settings, monkeypatch):
+    from pydantic import AnyHttpUrl, SecretStr
+
+    settings = settings.model_copy(
+        update={
+            "opencode_server_url": AnyHttpUrl("http://127.0.0.1:4096"),
+            "opencode_server_password": SecretStr("test-opencode-" + "x" * 32),
+        }
+    )
+    definitions = [
+        {
+            "providerID": "test",
+            "id": str(i),
+            "name": str(i),
+            "enabled": True,
+            "capabilities": {"output": ["text"]},
+        }
+        for i in range(2)
+    ]
+
+    async def native(http, method, path):
+        return list(definitions) if path == "/api/model" else []
+
+    monkeypatch.setattr(probes, "request", native)
+    first_models, first = await probes.catalog(settings)
+    definitions.reverse()
+    second_models, second = await probes.catalog(settings)
+    assert [m.model_id for m in first_models] != [m.model_id for m in second_models]
+    assert first == second

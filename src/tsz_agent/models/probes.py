@@ -115,7 +115,10 @@ async def catalog(settings: Settings) -> tuple[list[ModelProbe], str]:
     )
     context = fingerprint(
         {
-            "models": [m.model_dump(mode="json") for m in models],
+            "models": [
+                m.model_dump(mode="json")
+                for m in sorted(models, key=lambda model: model.usage_model())
+            ],
             "connections": connections,
             "deepseek_key": fingerprint(key.get_secret_value()) if key else None,
             "gateway": str(settings.opencode_server_url),
