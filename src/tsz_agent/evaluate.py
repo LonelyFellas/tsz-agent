@@ -55,7 +55,12 @@ async def evaluate(suite: Suite, output: Path) -> None:
                             "part_of_speech": case.context.target.part_of_speech,
                             "question_level": case.context.question_level,
                             "options": [
-                                c.model_dump(mode="json") for c in [case.context.target, *choices]
+                                {"option_id": option_id, "candidate": c.model_dump(mode="json")}
+                                for option_id, c in zip(
+                                    ("A", "B", "C", "D"),
+                                    [case.context.target, *choices],
+                                    strict=True,
+                                )
                             ],
                             "intended_answer": case.context.target.spelling,
                         }

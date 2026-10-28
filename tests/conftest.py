@@ -55,6 +55,15 @@ def pool():
 
 
 @pytest.fixture
+def generation_data(context, pool):
+    return {
+        "context": context.model_dump(mode="json"),
+        "candidate_pool": [c.model_dump(mode="json") for c in pool],
+        "reviewed_examples": [],
+    }
+
+
+@pytest.fixture
 async def store() -> AsyncIterator[Store]:
     url = os.getenv("TEST_DATABASE_URL")
     if not url:
