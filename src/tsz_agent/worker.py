@@ -11,7 +11,8 @@ from tsz_agent.clients.tsz import TaskError, TszClient
 from tsz_agent.config import Settings
 from tsz_agent.models.budget import StoreBudget
 from tsz_agent.models.deepseek import DeepSeekModel, QuestionModel
-from tsz_agent.schemas import Usage
+from tsz_agent.models.opencode import OpenCodeModel
+from tsz_agent.schemas import ModelSelection, Usage
 from tsz_agent.storage import Store
 
 logger = logging.getLogger("tsz_agent.worker")
@@ -35,22 +36,29 @@ async def run_once(
     def get_model() -> QuestionModel:
         nonlocal model
         if model is None:
-            model = (
-                factory(previous)
-                if factory
-                else DeepSeekModel(
-                    settings,
-                    previous,
-                    StoreBudget(
-                        store,
-                        run.id,
-                        token,
-                        previous,
-                        settings.model_request_limit,
-                        settings.output_token_limit,
-                    ),
-                )
+            budget = StoreBudget(
+                store,
+                run.id,
+                token,
+                previous,
+                settings.model_request_limit,
+                settings.output_token_limit,
             )
+            if factory:
+                model = factory(previous)
+            elif previous.model.startswith("opencode/"):
+                _, provider_id, model_id = previous.model.split("/", 2)
+                model = OpenCodeModel(
+                    settings,
+                    ModelSelection(
+                        source="opencode",
+                        provider_id=provider_id,
+                        model_id=model_id,
+                    ),
+                    budget,
+                )
+            else:
+                model = DeepSeekModel(settings, previous, budget)
         return model
 
     async def save(stage: str, checkpoint: dict[str, Any]) -> None:
@@ -100,15 +108,15 @@ async def run_once(
         renewal.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await renewal
-        if isinstance(model, DeepSeekModel):
+        if isinstance(model, (DeepSeekModel, OpenCodeModel)):
             await model.close()
     return True
 
 
 async def main() -> None:
     settings = Settings()
-    if settings.deepseek_api_key is None or not settings.deepseek_api_key.get_secret_value():
-        raise SystemExit("DEEPSEEK_API_KEY is required for the worker")
+    if settings.deepseek_api_key is None and settings.opencode_server_url is None:
+        raise SystemExit("DeepSeek or OpenCode must be configured for the worker")
     store = Store(settings.database_url.get_secret_value())
     try:
         await store.ready()

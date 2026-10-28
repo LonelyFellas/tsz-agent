@@ -180,6 +180,28 @@ class RunResult(StrictModel):
         return self
 
 
+class ModelSelection(StrictModel):
+    source: Literal["direct", "opencode"] = "direct"
+    provider_id: str = Field(
+        default="deepseek", min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+    )
+    model_id: str = Field(default="deepseek-flash", min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def valid_direct(self) -> "ModelSelection":
+        if self.source == "direct" and (self.provider_id, self.model_id) != (
+            "deepseek",
+            "deepseek-flash",
+        ):
+            raise ValueError("unsupported direct model")
+        return self
+
+    def usage_model(self) -> str:
+        if self.source == "direct":
+            return self.model_id
+        return f"opencode/{self.provider_id}/{self.model_id}"
+
+
 class Usage(StrictModel):
     model: str = "deepseek-flash"
     requests: int = 0

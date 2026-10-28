@@ -75,7 +75,7 @@ async def store() -> AsyncIterator[Store]:
     async with result.sessions.begin() as session:
         await session.execute(
             text(
-                "TRUNCATE agent_model_calls, agent_review_events, agent_review_current, agent_runs"
+                "TRUNCATE agent_model_setting, agent_model_calls, agent_review_events, agent_review_current, agent_runs"
             )
         )
     yield result

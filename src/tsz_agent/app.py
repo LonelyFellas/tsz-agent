@@ -18,6 +18,7 @@ from tsz_agent.schemas import (
     ModelCostLedgerPage,
     ModelCostOverview,
     ModelLedgerPage,
+    ModelSelection,
     ProblemDetails,
     ReviewEvent,
     ReviewReceipt,
@@ -122,6 +123,28 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except Exception as exc:
             raise Problem(503, "database_unavailable") from exc
         return {"status": "ready"}
+
+    @app.get("/v1/model-selection", dependencies=[Depends(authorized)])
+    async def get_model_selection() -> ModelSelection:
+        return await store.model_selection()
+
+    @app.put("/v1/model-selection", dependencies=[Depends(authorized)])
+    async def set_model_selection(body: ModelSelection) -> ModelSelection:
+        from tsz_agent.clients.tsz import TaskError
+        from tsz_agent.models.opencode import OpenCodeModel
+
+        if body.source == "direct":
+            if (
+                settings.deepseek_api_key is None
+                or not settings.deepseek_api_key.get_secret_value()
+            ):
+                raise Problem(422, "model_not_configured")
+        else:
+            try:
+                await OpenCodeModel.validate_selection(settings, body)
+            except TaskError as exc:
+                raise Problem(503 if exc.retryable else 422, exc.code) from exc
+        return await store.set_model_selection(body)
 
     @app.get("/v1/model-calls", response_model=ModelLedgerPage, dependencies=[Depends(authorized)])
     async def get_model_ledger(

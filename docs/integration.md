@@ -131,3 +131,9 @@ WHERE created_at >= now() - interval '24 hours';
 结果状态与记账独立：取消和租约失效阻止新调用及题目写入，但已经预留调用的供应商回执仍按调用 ID 累计。重复相同回执幂等，不同内容冲突。未知 token/金额不会被声明为已确认的零消费。
 
 API 的非预期异常在 HTTP 中间件返回脱敏 Problem Details，包含 `x-request-id`；原始异常不交给 Uvicorn 输出 traceback。此边界覆盖当前普通 JSON 接口，后续添加流式响应/后台响应任务时需另行验证响应开始后的错误处理。
+
+## 模型选择与 OpenCode
+
+新增 `GET/PUT /v1/model-selection`，沿用内部服务 token。`source` 为 `direct` 或 `opencode`，另传 `provider_id`、`model_id`。配置保存在 Agent 数据库，任务创建时固定模型；切换不影响已创建任务或其重试。需显式迁移至 `0005`，API 与 worker 配置同一 `TSZ_AGENT_OPENCODE_SERVER_URL` / `TSZ_AGENT_OPENCODE_SERVER_PASSWORD`。Key 由 tsz-rust 代理到 OpenCode 保存，Agent 不接收服务商 Key。
+
+OpenCode v2.1.4 无会话生成接口只返回文本，不提供 Token/费用或单次 Token 上限。账本保留未知用量和费用；调度保留预算预留，不把预留视作上游消费硬限制。付费上限须在服务商设置。配套界面、发布与回退说明在 tsz 仓库 `docs/features/opencode-models/README.md`。
