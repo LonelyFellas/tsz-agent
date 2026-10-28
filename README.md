@@ -36,6 +36,8 @@ uv run python -m tsz_agent.worker
 | `GET /v1/runs/{id}` | 查询状态、最终结果和已知用量 |
 | `GET /v1/runs/{id}/model-metrics` | 查询模型缓存命中率、调用耗时及逐次调用明细 |
 | `GET /v1/model-calls` | 分页查询模型调用账本与筛选汇总，供业务后端超管接口使用 |
+| `GET /v1/model-costs` | 分页账本及逐次人民币预估费用、价格快照和未知数量 |
+| `GET /v1/model-costs/overview` | 累计、北京时间今日/本周/本月预估费用及回执覆盖量 |
 | `POST /v1/runs/{id}/cancel` | 取消未终结任务；迟到结果无法覆盖取消状态 |
 | `POST /v1/review-events` | 接收权威审核、修改、退回及撤销事件 |
 
@@ -93,3 +95,5 @@ uv run python -m tsz_agent.evaluate --suite evals/example.json
 Agent 使用独立数据库和账号，不共享 tsz 业务表权限。Compose 仅是部署模板，本次没有部署服务器或创建远端发布。
 
 模型统计需要显式执行迁移 `0003`。更新时停止 API/worker，执行 `alembic upgrade head` 后启动新版；启动过程不会自动迁移。历史调用的统计保持未知，不推算耗时或缓存量。已有统计数据时 `0003` 会拒绝直接回退，需先保全观测记录。
+
+费用预估需要显式迁移 `0004`。新调用保存当时的官方人民币单价和价格版本，按真实 token 用 Decimal 计算；不是供应商实际账单，旧调用没有价格快照时仍未知。首页仅超管可见，展示累计、今日、本周和本月，并标明未计价记录。当前计价依据覆盖 2026-10-28 至 2027-01-01（不含）；到期前需核实价格及下一年日历再更新，超出覆盖范围不猜价格。价格快照或预估金额非空时拒绝直接回退迁移。详见 [费用口径与验证](docs/features/model-cost-overview/README.md)。

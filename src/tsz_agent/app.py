@@ -15,6 +15,8 @@ from starlette.responses import Response
 from tsz_agent.config import Settings
 from tsz_agent.schemas import (
     CreateRun,
+    ModelCostLedgerPage,
+    ModelCostOverview,
     ModelLedgerPage,
     ProblemDetails,
     ReviewEvent,
@@ -128,6 +130,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         run_id: UUID | None = None,
     ) -> ModelLedgerPage:
         return await store.model_ledger(page, page_size, run_id)
+
+    @app.get(
+        "/v1/model-costs", response_model=ModelCostLedgerPage, dependencies=[Depends(authorized)]
+    )
+    async def get_cost_ledger(
+        page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+        run_id: UUID | None = None,
+    ) -> ModelCostLedgerPage:
+        return await store.model_cost_ledger(page, page_size, run_id)
+
+    @app.get(
+        "/v1/model-costs/overview",
+        response_model=ModelCostOverview,
+        dependencies=[Depends(authorized)],
+    )
+    async def get_cost_overview() -> ModelCostOverview:
+        return await store.model_cost_overview()
 
     @app.post(
         "/v1/runs", response_model=RunView, status_code=202, dependencies=[Depends(authorized)]
