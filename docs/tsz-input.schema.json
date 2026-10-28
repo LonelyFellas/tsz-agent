@@ -1,0 +1,328 @@
+{
+  "$defs": {
+    "Candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_spellings": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 30,
+          "title": "Accepted Spellings",
+          "type": "array"
+        },
+        "answer_profile": {
+          "enum": [
+            "BrE",
+            "AmE"
+          ],
+          "title": "Answer Profile",
+          "type": "string"
+        },
+        "candidate_ref": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Candidate Ref",
+          "type": "string"
+        },
+        "content_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Content Fingerprint",
+          "type": "string"
+        },
+        "definition": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Definition",
+          "type": "string"
+        },
+        "form_type": {
+          "const": "base",
+          "default": "base",
+          "title": "Form Type",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "A1",
+            "A2",
+            "B1",
+            "B2",
+            "C1",
+            "C2"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "other_definitions": {
+          "items": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Other Definitions",
+          "type": "array"
+        },
+        "part_of_speech": {
+          "maxLength": 50,
+          "minLength": 1,
+          "title": "Part Of Speech",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRef"
+        },
+        "spelling": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Spelling",
+          "type": "string"
+        },
+        "teaching_eligible": {
+          "title": "Teaching Eligible",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "candidate_ref",
+        "source",
+        "content_fingerprint",
+        "spelling",
+        "part_of_speech",
+        "level",
+        "definition",
+        "answer_profile",
+        "teaching_eligible"
+      ],
+      "title": "Candidate",
+      "type": "object"
+    },
+    "CandidatePage": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          },
+          "maxItems": 80,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "CandidatePage",
+      "type": "object"
+    },
+    "CandidateSearch": {
+      "additionalProperties": false,
+      "properties": {
+        "answer_profile": {
+          "enum": [
+            "BrE",
+            "AmE"
+          ],
+          "title": "Answer Profile",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "exclude_candidate_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 80,
+          "title": "Exclude Candidate Refs",
+          "type": "array"
+        },
+        "limit": {
+          "const": 40,
+          "default": 40,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "question_level": {
+          "enum": [
+            "A1",
+            "A2",
+            "B1",
+            "B2",
+            "C1",
+            "C2"
+          ],
+          "title": "Question Level",
+          "type": "string"
+        },
+        "target_source": {
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "required": [
+        "target_source",
+        "question_level",
+        "answer_profile"
+      ],
+      "title": "CandidateSearch",
+      "type": "object"
+    },
+    "EntriesRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EntryRead"
+          },
+          "maxItems": 80,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "EntriesRequest",
+      "type": "object"
+    },
+    "EntryRead": {
+      "additionalProperties": false,
+      "properties": {
+        "answer_profile": {
+          "enum": [
+            "BrE",
+            "AmE"
+          ],
+          "title": "Answer Profile",
+          "type": "string"
+        },
+        "candidate_ref": {
+          "title": "Candidate Ref",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceRef"
+        }
+      },
+      "required": [
+        "candidate_ref",
+        "source",
+        "answer_profile"
+      ],
+      "title": "EntryRead",
+      "type": "object"
+    },
+    "GenerationContext": {
+      "additionalProperties": false,
+      "properties": {
+        "answer_profile": {
+          "enum": [
+            "BrE",
+            "AmE"
+          ],
+          "title": "Answer Profile",
+          "type": "string"
+        },
+        "contract_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "external_request_id": {
+          "format": "uuid",
+          "title": "External Request Id",
+          "type": "string"
+        },
+        "question_level": {
+          "enum": [
+            "A1",
+            "A2",
+            "B1",
+            "B2",
+            "C1",
+            "C2"
+          ],
+          "title": "Question Level",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Candidate"
+        }
+      },
+      "required": [
+        "external_request_id",
+        "target",
+        "question_level",
+        "answer_profile"
+      ],
+      "title": "GenerationContext",
+      "type": "object"
+    },
+    "SourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_id": {
+          "format": "uuid",
+          "title": "Definition Id",
+          "type": "string"
+        },
+        "entry_id": {
+          "format": "uuid",
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "form_id": {
+          "format": "uuid",
+          "title": "Form Id",
+          "type": "string"
+        },
+        "pos_id": {
+          "format": "uuid",
+          "title": "Pos Id",
+          "type": "string"
+        },
+        "publication_id": {
+          "format": "uuid",
+          "title": "Publication Id",
+          "type": "string"
+        },
+        "sense_id": {
+          "format": "uuid",
+          "title": "Sense Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_id",
+        "publication_id",
+        "pos_id",
+        "sense_id",
+        "definition_id",
+        "form_id"
+      ],
+      "title": "SourceRef",
+      "type": "object"
+    }
+  },
+  "title": "Proposed tsz-rust internal Agent contract v1"
+}
