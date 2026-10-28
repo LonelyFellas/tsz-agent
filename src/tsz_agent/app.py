@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
 from tsz_agent.config import Settings
+from tsz_agent.models.probes import ModelProbeReport, ProbeService
 from tsz_agent.schemas import (
     CreateRun,
     ModelCostLedgerPage,
@@ -38,9 +39,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     owned_store = store is None
     store = store or Store(settings.database_url.get_secret_value())
 
+    probes = ProbeService(settings, store)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        await probes.close()
         if owned_store:
             await store.close()
 
@@ -124,6 +128,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise Problem(503, "database_unavailable") from exc
         return {"status": "ready"}
 
+    @app.get("/v1/model-probes", dependencies=[Depends(authorized)])
+    async def get_model_probes() -> ModelProbeReport:
+        from tsz_agent.clients.tsz import TaskError
+
+        try:
+            return await probes.report()
+        except TaskError as exc:
+            raise Problem(503, exc.code) from exc
+
+    @app.post("/v1/model-probes", status_code=202, dependencies=[Depends(authorized)])
+    async def start_model_probes() -> ModelProbeReport:
+        from tsz_agent.clients.tsz import TaskError
+
+        try:
+            return await probes.start()
+        except TaskError as exc:
+            raise Problem(503, exc.code) from exc
+
     @app.get("/v1/model-selection", dependencies=[Depends(authorized)])
     async def get_model_selection() -> ModelSelection:
         return await store.model_selection()
@@ -133,6 +155,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         from tsz_agent.clients.tsz import TaskError
         from tsz_agent.models.opencode import OpenCodeModel
 
+        try:
+            context = await probes.require_available(body)
+        except TaskError as exc:
+            raise Problem(503 if exc.retryable else 422, exc.code) from exc
         if body.source == "direct":
             if (
                 settings.deepseek_api_key is None
@@ -144,7 +170,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 await OpenCodeModel.validate_selection(settings, body)
             except TaskError as exc:
                 raise Problem(503 if exc.retryable else 422, exc.code) from exc
-        return await store.set_model_selection(body)
+        try:
+            return await store.set_model_selection(body, probe_context=context)
+        except TaskError as exc:
+            raise Problem(422, exc.code) from exc
 
     @app.get("/v1/model-calls", response_model=ModelLedgerPage, dependencies=[Depends(authorized)])
     async def get_model_ledger(
