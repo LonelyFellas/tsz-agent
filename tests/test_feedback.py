@@ -52,7 +52,7 @@ async def test_feedback_idempotency_conflict_and_revocation_cannot_be_reversed_b
     assert await store.feedback(revoked)
     late = first.model_copy(update={"event_id": uuid4(), "review_revision": 2})
     assert not await store.feedback(late)
-    assert await store.examples() == []
+    assert await store.examples(context) == []
 
 
 async def test_rejected_feedback_uses_actual_question_and_is_learned_as_negative(
@@ -136,4 +136,65 @@ async def test_review_cannot_change_question_identity_even_for_out_of_order_even
     # Conflict does not consume the event identity or change the existing knowledge.
     same = other.model_copy(update={"question_revision_id": event.question_revision_id})
     assert await store.feedback(same) is (not first_is_revocation)
-    assert bool(await store.examples()) is (not first_is_revocation)
+    assert bool(await store.examples(context)) is (not first_is_revocation)
+
+
+async def test_retrieval_filters_before_limit_and_prioritizes_old_exact_sense(
+    store, settings, context, pool
+):
+    from datetime import timedelta
+
+    from tsz_agent.storage import ReviewCurrent, now
+
+    run = await generate(store, settings, context, pool)
+    exact = approved(run, context, pool)
+    await store.feedback(exact)
+    async with store.sessions.begin() as session:
+        row = await session.get(ReviewCurrent, exact.review_id)
+        row.updated_at = now() - timedelta(days=30)
+        for i in range(230):
+            body = approved(run, context, pool).model_dump(mode="json")
+            if i < 100:
+                # More unrelated recent feedback than the previous global window.
+                body["example"]["question_level"] = "A2"
+            elif i < 205:
+                body["example"]["target"]["part_of_speech"] = "noun"
+            elif i < 210:
+                body["example"]["target"]["answer_profile"] = "AmE"
+            else:
+                body["example"]["target"] = pool[0].model_dump(mode="json")
+            session.add(
+                ReviewCurrent(
+                    review_id=uuid4(),
+                    review_revision=1,
+                    source_run_id=run.id,
+                    active=True,
+                    payload=body,
+                )
+            )
+    events = await store.examples(context)
+    assert len(events) == 12
+    assert events[0].event_id == exact.event_id
+    assert all(e.example.question_level == "A1" for e in events)
+    assert all(e.example.target.answer_profile == "BrE" for e in events)
+    assert all(e.example.target.part_of_speech == "verb" for e in events)
+
+    class CountingSource(Source):
+        def __init__(self):
+            super().__init__(context, pool)
+            self.checks = 0
+
+        async def check_sources(self, request_id, candidates):
+            self.checks += 1
+            if self.stale or candidates[0] == context.target:
+                raise TaskError("source_changed")
+
+    from tsz_agent.clients.tsz import TaskError
+
+    source = CountingSource()
+    chosen = await knowledge(store, source, context)
+    assert len(chosen) == 4
+    assert source.checks == 5  # The stale exact match does not hide valid fallbacks.
+    source.stale, source.checks = True, 0
+    assert await knowledge(store, source, context) == []
+    assert source.checks == 12  # Bound source reads even with many stale examples.

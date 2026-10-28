@@ -324,5 +324,5 @@
       "type": "object"
     }
   },
-  "title": "Proposed tsz-rust internal Agent contract v1"
+  "title": "Agent validation for tsz-rust internal contract v1"
 }
