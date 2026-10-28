@@ -63,6 +63,40 @@ Agent 的基础校验不证明语义唯一性。所有正式题目在 tsz-rust �
 
 ## 调用预算与回执
 
+### 模型缓存与耗时统计
+
+admin 账本使用独立服务鉴权的 `GET /v1/model-calls?page=1&page_size=20&run_id=<可选任务UUID>`。`page` 范围 1–1,000,000，`page_size` 范围 1–100；省略 `run_id` 时查询全部调用。返回 `items/total/page/page_size/summary`，汇总覆盖全部筛选结果，不限当前页。只投影调用标识、时间、模型、已知 token、未知费用和观测，不返回提示词、候选池或模型原文。`tsz-rust` 的 `/api/v1/admin/ai-ledger` 用当前超管身份鉴权后访问，浏览器不持有 Agent 服务凭据。跨仓范围与验收见 [超管 AI 账本](features/admin-ai-ledger/README.md)。
+
+`GET /v1/runs/{run_id}/model-metrics` 使用相同的服务鉴权；不存在的任务返回 `404 run_not_found`。这是新增的独立响应契约，原有 `GET /v1/runs/{run_id}` 和 `RunView.usage` 保持兼容。
+
+- `reserved_calls`：该任务调用账本中的预留数量，可能包含预留后尚未发送就中断的调用。
+- `observed_calls`：已保存完整调用耗时观测的数量，包含返回响应、失败和取消的调用。进程被强制终止或历史调用可能没有观测。
+- `cache_observed_calls`：同时取得有效命中/未命中计数的调用数。缺失任一计数、负值或两者之和与输入 token 总量不一致时，两项均记为 `null`。
+- `cache_hit_tokens` / `cache_miss_tokens`：仅汇总有效缓存回执；没有有效回执时为 `null`。采用 DeepSeek 原生 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`，不使用 SDK 缺失数据时的默认零值。[供应商字段说明](https://api-docs.deepseek.com/guides/kv_cache/)
+- `cache_hit_rate`：`sum(hit) / (sum(hit) + sum(miss))`，范围 0–1；无有效回执或分母为零时为 `null`。这是按已观测 token 加权的比例，不是各调用命中率的平均值；同时查看 `cache_observed_calls` 可判断数据覆盖情况。
+- `total_duration_ms` / `average_duration_ms`：已观测调用的总耗时/平均耗时；没有观测时为 `null`。使用单调时钟，从模型请求发出前计到 SDK 返回或抛错，包含网络与 SDK 响应处理，不包含额度预留、落库、任务排队和词库请求；不是首 token 延迟或任务端到端耗时。
+- `calls`：按预留时间排列的明细，包含 `call_id`、`created_at`、`metrics`。未观测调用的 `metrics` 为 `null`；已观测明细包含 `phase=generate/review`、`outcome=response/error/cancelled`、`duration_ms` 以及缓存计数。`response` 仅表示收到模型响应，不保证结构或语义检查通过；结构修复会产生独立的新调用明细。
+
+统计按调用 ID 幂等写入；重复相同内容不累加，不同内容拒绝覆盖。取消和租约移交不阻止迟到观测写入。统计独立于用量结算：超时、取消或缺失 token 回执时即使已记录耗时，未知输出预算仍保持预留，费用仍为 `null`。历史记录不回填估计值。
+
+数据库迁移为 `0003`，增加可空的逐调用 `metrics`。必须显式迁移后启动新版 API/worker；已有观测时回退会拒绝删除统计数据。
+
+若需查看全服务的总体指标，可在 Agent 自有数据库对同一时间窗口求和，而不要平均每个任务的命中率。例如：
+
+```sql
+SELECT count(*) AS reserved_calls,
+       count(metrics) AS observed_calls,
+       count(metrics->>'cache_hit_tokens') AS cache_observed_calls,
+       sum((metrics->>'cache_hit_tokens')::numeric)
+         / nullif(sum((metrics->>'cache_hit_tokens')::numeric
+                    + (metrics->>'cache_miss_tokens')::numeric), 0) AS cache_hit_rate,
+       avg((metrics->>'duration_ms')::double precision) AS average_duration_ms
+FROM agent_model_calls
+WHERE created_at >= now() - interval '24 hours';
+```
+
+### 预算结算
+
 迁移 `0002` 引入独立调用账本。API 的 `usage.requests` 是发送前预留的尝试数，不依赖 SDK 成功响应计数。每次发送（包括 SDK 的结构修复）按已知输出和未结算预留共同计算剩余额度；未知用量继续占用预留额度。
 
 结果状态与记账独立：取消和租约失效阻止新调用及题目写入，但已经预留调用的供应商回执仍按调用 ID 累计。重复相同回执幂等，不同内容冲突。未知 token/金额不会被声明为已确认的零消费。

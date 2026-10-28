@@ -165,6 +165,8 @@ async def test_cancellation_waits_for_already_received_usage(settings):
             await task
         assert budget.usage().requests == 1
         assert budget.usage().input_tokens == 50 and budget.usage().output_tokens == 100
+        metrics = next(iter(budget.metrics.values()))
+        assert metrics.outcome == "response" and metrics.duration_ms >= 0
     finally:
         release.set()
         if not task.done():

@@ -5,12 +5,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
     UniqueConstraint,
+    cast,
     func,
     select,
     text,
@@ -24,8 +27,14 @@ from tsz_agent.clients.tsz import TaskError
 from tsz_agent.schemas import (
     CreateRun,
     GenerationContext,
+    ModelCallMetrics,
+    ModelCallView,
+    ModelLedgerItem,
+    ModelLedgerPage,
+    ModelLedgerSummary,
     ReviewEvent,
     ReviewExample,
+    RunModelMetrics,
     RunResult,
     RunView,
     Usage,
@@ -93,6 +102,7 @@ class ModelCall(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class ReviewCurrent(Base):
@@ -136,7 +146,7 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0002":
+            if revision != "0003":
                 raise RuntimeError("unsupported_database_revision")
 
     async def create(self, body: CreateRun, key: UUID) -> RunView:
@@ -174,6 +184,96 @@ class Store:
         async with self.sessions() as session:
             run = await session.get(Run, run_id)
             return view(run) if run else None
+
+    async def model_metrics(self, run_id: UUID) -> RunModelMetrics | None:
+        async with self.sessions() as session:
+            if await session.get(Run, run_id) is None:
+                return None
+            calls = [
+                ModelCallView(call_id=call.id, created_at=call.created_at, metrics=call.metrics)
+                for call in await session.scalars(
+                    select(ModelCall)
+                    .where(ModelCall.run_id == run_id)
+                    .order_by(ModelCall.created_at, ModelCall.id)
+                )
+            ]
+        observed = [call.metrics for call in calls if call.metrics is not None]
+        cached = [item for item in observed if item.cache_hit_tokens is not None]
+        hits = sum(item.cache_hit_tokens or 0 for item in cached) if cached else None
+        misses = sum(item.cache_miss_tokens or 0 for item in cached) if cached else None
+        cache_total = (hits or 0) + (misses or 0)
+        duration = sum(item.duration_ms for item in observed) if observed else None
+        return RunModelMetrics(
+            run_id=run_id,
+            reserved_calls=len(calls),
+            observed_calls=len(observed),
+            cache_observed_calls=len(cached),
+            cache_hit_tokens=hits,
+            cache_miss_tokens=misses,
+            cache_hit_rate=hits / cache_total if hits is not None and cache_total else None,
+            total_duration_ms=duration,
+            average_duration_ms=duration / len(observed) if duration is not None else None,
+            calls=calls,
+        )
+
+    async def model_ledger(self, page: int, page_size: int, run_id: UUID | None) -> ModelLedgerPage:
+        hit = cast(ModelCall.metrics["cache_hit_tokens"].astext, BigInteger)
+        miss = cast(ModelCall.metrics["cache_miss_tokens"].astext, BigInteger)
+        duration = cast(ModelCall.metrics["duration_ms"].astext, Float)
+        filters = [ModelCall.run_id == run_id] if run_id is not None else []
+        async with self.sessions() as session:
+            totals = (
+                (
+                    await session.execute(
+                        select(
+                            func.count(ModelCall.id).label("total"),
+                            func.count(duration).label("observed_calls"),
+                            func.count(ModelCall.recorded_at).label("usage_observed_calls"),
+                            func.count(hit).label("cache_observed_calls"),
+                            func.sum(ModelCall.input_tokens).label("input_tokens"),
+                            func.sum(ModelCall.output_tokens).label("output_tokens"),
+                            func.sum(hit).label("cache_hit_tokens"),
+                            func.sum(miss).label("cache_miss_tokens"),
+                            func.sum(duration).label("total_duration_ms"),
+                            func.avg(duration).label("average_duration_ms"),
+                        ).where(*filters)
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            rows = await session.execute(
+                select(ModelCall, Run)
+                .join(Run, Run.id == ModelCall.run_id)
+                .where(*filters)
+                .order_by(ModelCall.created_at.desc(), ModelCall.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            items = [
+                ModelLedgerItem(
+                    call_id=call.id,
+                    run_id=run.id,
+                    external_request_id=run.external_request_id,
+                    model=Usage.model_validate(run.usage).model,
+                    created_at=call.created_at,
+                    input_tokens=call.input_tokens,
+                    output_tokens=call.output_tokens,
+                    metrics=call.metrics,
+                )
+                for call, run in rows
+            ]
+        counts = dict(totals)
+        total = counts.pop("total")
+        cache_total = (counts["cache_hit_tokens"] or 0) + (counts["cache_miss_tokens"] or 0)
+        counts["cache_hit_rate"] = counts["cache_hit_tokens"] / cache_total if cache_total else None
+        return ModelLedgerPage(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            summary=ModelLedgerSummary.model_validate(counts),
+        )
 
     async def cancel(self, run_id: UUID) -> RunView | None:
         async with self.sessions.begin() as session:
@@ -328,6 +428,19 @@ class Store:
             usage.output_tokens += output_tokens
             run.usage, run.updated_at = usage.model_dump(mode="json"), now()
             return usage
+
+    async def record_model_metrics(
+        self, run_id: UUID, call_id: UUID, metrics: ModelCallMetrics
+    ) -> None:
+        async with self.sessions.begin() as session:
+            # Like usage receipts, observations survive cancellation and lease transfer.
+            call = await session.get(ModelCall, call_id, with_for_update=True)
+            if call is None or call.run_id != run_id:
+                raise TaskError("usage_receipt_invalid")
+            payload = metrics.model_dump(mode="json")
+            if call.metrics is not None and call.metrics != payload:
+                raise TaskError("usage_receipt_conflict")
+            call.metrics = payload
 
     async def feedback(self, event: ReviewEvent) -> bool:
         body, payload_hash = event.model_dump(mode="json"), digest(event.model_dump(mode="json"))

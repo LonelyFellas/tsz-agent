@@ -63,6 +63,7 @@ async def test_real_sdk_serialization_typed_output_and_usage_without_network(set
         assert model.usage().input_tokens == 80
         assert model.usage().output_tokens == 120
         assert model.usage().cost is None
+        assert [item.phase for item in model.budget.metrics.values()] == ["generate", "review"]
         assert all(c["model"] == "deepseek-flash" for c in calls)
         assert all(c["thinking"]["type"] == "disabled" for c in calls)
         assert all("reasoning_effort" not in c for c in calls)

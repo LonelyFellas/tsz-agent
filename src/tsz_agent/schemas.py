@@ -188,6 +188,69 @@ class Usage(StrictModel):
     cost: str | None = None
 
 
+class ModelCallMetrics(StrictModel):
+    phase: Literal["generate", "review"]
+    outcome: Literal["response", "error", "cancelled"]
+    duration_ms: float = Field(ge=0, allow_inf_nan=False)
+    cache_hit_tokens: int | None = Field(default=None, ge=0)
+    cache_miss_tokens: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def paired_cache_counts(self) -> "ModelCallMetrics":
+        if (self.cache_hit_tokens is None) != (self.cache_miss_tokens is None):
+            raise ValueError("cache counts must both be known or both be unknown")
+        return self
+
+
+class ModelCallView(StrictModel):
+    call_id: UUID
+    created_at: datetime
+    metrics: ModelCallMetrics | None
+
+
+class RunModelMetrics(StrictModel):
+    run_id: UUID
+    reserved_calls: int
+    observed_calls: int
+    cache_observed_calls: int
+    cache_hit_tokens: int | None
+    cache_miss_tokens: int | None
+    cache_hit_rate: float | None
+    total_duration_ms: float | None
+    average_duration_ms: float | None
+    calls: list[ModelCallView]
+
+
+class ModelLedgerItem(ModelCallView):
+    run_id: UUID
+    external_request_id: UUID
+    model: str
+    input_tokens: int | None
+    output_tokens: int | None
+    cost: str | None = None
+
+
+class ModelLedgerSummary(StrictModel):
+    observed_calls: int
+    usage_observed_calls: int
+    cache_observed_calls: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cache_hit_tokens: int | None
+    cache_miss_tokens: int | None
+    cache_hit_rate: float | None
+    total_duration_ms: float | None
+    average_duration_ms: float | None
+
+
+class ModelLedgerPage(StrictModel):
+    items: list[ModelLedgerItem]
+    total: int
+    page: int
+    page_size: int
+    summary: ModelLedgerSummary
+
+
 class RunView(StrictModel):
     contract_version: Literal[1] = 1
     id: UUID

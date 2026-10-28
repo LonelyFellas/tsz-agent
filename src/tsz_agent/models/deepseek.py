@@ -88,7 +88,7 @@ class DeepSeekModel:
             files("tsz_agent.capabilities.vocabulary_mcq").joinpath("generate.txt").read_text()
         )
         agent: Agent[None, GenerationOutput] = Agent(
-            BudgetedModel(self.model, self.budget),
+            BudgetedModel(self.model, self.budget, "generate"),
             output_type=PromptedOutput(GenerationOutput),
             instructions=instructions,
             model_settings=self.model_settings,
@@ -115,7 +115,7 @@ class DeepSeekModel:
             files("tsz_agent.capabilities.vocabulary_mcq").joinpath("review.txt").read_text()
         )
         agent: Agent[None, SemanticReview] = Agent(
-            BudgetedModel(self.model, self.budget),
+            BudgetedModel(self.model, self.budget, "review"),
             output_type=PromptedOutput(SemanticReview),
             instructions=instructions,
             model_settings=self.model_settings,
