@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -13,7 +13,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
 from tsz_agent.config import Settings
-from tsz_agent.schemas import CreateRun, ProblemDetails, ReviewEvent, ReviewReceipt, RunView
+from tsz_agent.schemas import (
+    CreateRun,
+    ModelLedgerPage,
+    ProblemDetails,
+    ReviewEvent,
+    ReviewReceipt,
+    RunModelMetrics,
+    RunView,
+)
 from tsz_agent.storage import Conflict, Store
 
 
@@ -113,6 +121,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise Problem(503, "database_unavailable") from exc
         return {"status": "ready"}
 
+    @app.get("/v1/model-calls", response_model=ModelLedgerPage, dependencies=[Depends(authorized)])
+    async def get_model_ledger(
+        page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+        run_id: UUID | None = None,
+    ) -> ModelLedgerPage:
+        return await store.model_ledger(page, page_size, run_id)
+
     @app.post(
         "/v1/runs", response_model=RunView, status_code=202, dependencies=[Depends(authorized)]
     )
@@ -122,6 +138,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/v1/runs/{run_id}", response_model=RunView, dependencies=[Depends(authorized)])
     async def get_run(run_id: UUID) -> RunView:
         result = await store.get(run_id)
+        if result is None:
+            raise Problem(404, "run_not_found")
+        return result
+
+    @app.get(
+        "/v1/runs/{run_id}/model-metrics",
+        response_model=RunModelMetrics,
+        dependencies=[Depends(authorized)],
+    )
+    async def get_model_metrics(run_id: UUID) -> RunModelMetrics:
+        result = await store.model_metrics(run_id)
         if result is None:
             raise Problem(404, "run_not_found")
         return result

@@ -1,7 +1,8 @@
 """Reserve before dispatch; settle known usage independently of task result ownership."""
 
 import asyncio
-from typing import TYPE_CHECKING, Protocol
+from time import perf_counter
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID, uuid4
 
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -10,7 +11,7 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
 
 from tsz_agent.clients.tsz import TaskError
-from tsz_agent.schemas import Usage
+from tsz_agent.schemas import ModelCallMetrics, Usage
 
 if TYPE_CHECKING:
     from tsz_agent.storage import Store
@@ -20,6 +21,7 @@ class CallBudget(Protocol):
     def usage(self) -> Usage: ...
     async def reserve(self, call_id: UUID, requested_output: int) -> int: ...
     async def record(self, call_id: UUID, input_tokens: int, output_tokens: int) -> None: ...
+    async def record_metrics(self, call_id: UUID, metrics: ModelCallMetrics) -> None: ...
 
 
 class MemoryBudget:
@@ -30,6 +32,7 @@ class MemoryBudget:
         self.request_limit, self.output_limit = request_limit, output_limit
         self.pending: dict[UUID, int] = {}
         self.receipts: dict[UUID, tuple[int, int]] = {}
+        self.metrics: dict[UUID, ModelCallMetrics] = {}
         self.lock = asyncio.Lock()
 
     def usage(self) -> Usage:
@@ -62,6 +65,14 @@ class MemoryBudget:
             self.receipts[call_id] = receipt
             self.current.input_tokens += input_tokens
             self.current.output_tokens += output_tokens
+
+    async def record_metrics(self, call_id: UUID, metrics: ModelCallMetrics) -> None:
+        async with self.lock:
+            if call_id not in self.pending and call_id not in self.receipts:
+                raise TaskError("usage_receipt_invalid")
+            if call_id in self.metrics and self.metrics[call_id] != metrics:
+                raise TaskError("usage_receipt_conflict")
+            self.metrics[call_id] = metrics.model_copy()
 
 
 class StoreBudget:
@@ -100,13 +111,17 @@ class StoreBudget:
             output_tokens,
         )
 
+    async def record_metrics(self, call_id: UUID, metrics: ModelCallMetrics) -> None:
+        await self.store.record_model_metrics(self.run_id, call_id, metrics)
+
 
 class BudgetedModel(WrapperModel):
     """Guard every non-streaming request, including PydanticAI's repair retries."""
 
-    def __init__(self, wrapped: Model, budget: CallBudget):
+    def __init__(self, wrapped: Model, budget: CallBudget, phase: Literal["generate", "review"]):
         super().__init__(wrapped)
         self.budget = budget
+        self.phase = phase
 
     async def request(
         self,
@@ -118,23 +133,50 @@ class BudgetedModel(WrapperModel):
         call_id = uuid4()
         allowance = await self.budget.reserve(call_id, settings.get("max_tokens") or 3000)
         settings["max_tokens"] = allowance
-        # Failure/cancellation leaves the reservation held: provider consumption is unknown.
-        response = await self.wrapped.request(messages, settings, model_request_parameters)
-        if response.usage.input_tokens == 0 and response.usage.output_tokens == 0:
-            # Providers may omit usage and SDKs default both counters to zero. Keep unknown
-            # consumption reserved instead of treating that as a confirmed zero-cost reply.
-            return response
-        receipt = asyncio.create_task(
-            self.budget.record(
-                call_id,
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-            )
-        )
+        response = None
+        outcome: Literal["response", "error", "cancelled"] = "error"
+        started = perf_counter()
         try:
-            await asyncio.shield(receipt)
+            response = await self.wrapped.request(messages, settings, model_request_parameters)
+            outcome = "response"
+            return response
         except asyncio.CancelledError:
-            # A known receipt must finish recording before cancellation escapes this request.
-            await receipt
+            outcome = "cancelled"
             raise
-        return response
+        finally:
+            metrics = ModelCallMetrics(
+                phase=self.phase,
+                outcome=outcome,
+                duration_ms=(perf_counter() - started) * 1000,
+            )
+            if response is not None:
+                # SDK cache_read_tokens defaults to zero even when the provider omitted it.
+                # Only use the explicit DeepSeek counters retained in usage.details.
+                hit = response.usage.details.get("prompt_cache_hit_tokens")
+                miss = response.usage.details.get("prompt_cache_miss_tokens")
+                if (
+                    type(hit) is int
+                    and type(miss) is int
+                    and hit >= 0
+                    and miss >= 0
+                    and hit + miss == response.usage.input_tokens
+                ):
+                    metrics.cache_hit_tokens, metrics.cache_miss_tokens = hit, miss
+
+            async def settle() -> None:
+                # Missing usage, failures and cancellation keep the output reservation held.
+                if response is not None and (
+                    response.usage.input_tokens or response.usage.output_tokens
+                ):
+                    await self.budget.record(
+                        call_id, response.usage.input_tokens, response.usage.output_tokens
+                    )
+                await self.budget.record_metrics(call_id, metrics)
+
+            receipt = asyncio.create_task(settle())
+            try:
+                await asyncio.shield(receipt)
+            except asyncio.CancelledError:
+                # Persist observations and known usage before cancellation escapes.
+                await receipt
+                raise

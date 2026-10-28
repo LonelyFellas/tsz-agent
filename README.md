@@ -34,6 +34,8 @@ uv run python -m tsz_agent.worker
 |---|---|
 | `POST /v1/runs` | 带 UUID `Idempotency-Key` 创建委托，返回 202 |
 | `GET /v1/runs/{id}` | 查询状态、最终结果和已知用量 |
+| `GET /v1/runs/{id}/model-metrics` | 查询模型缓存命中率、调用耗时及逐次调用明细 |
+| `GET /v1/model-calls` | 分页查询模型调用账本与筛选汇总，供业务后端超管接口使用 |
 | `POST /v1/runs/{id}/cancel` | 取消未终结任务；迟到结果无法覆盖取消状态 |
 | `POST /v1/review-events` | 接收权威审核、修改、退回及撤销事件 |
 
@@ -57,6 +59,7 @@ uv run python -m tsz_agent.worker
 - DeepSeek 使用供应商原生 `max_tokens` 字段；每一次请求（包括 JSON 修复重试）按剩余输出预算收紧上限。显式关闭思考模式。
 - worker 在发送前向 `agent_model_calls` 预留调用次数与输出额度；超时、崩溃或缺少用量的回复不退还未知额度。`usage.requests` 表示预留的调用尝试，可能包含预留后尚未发送就中断的尝试；input/output tokens 仅为已知回执，费用未知保持 `null`。
 - 已知用量按调用 ID 独立幂等累计，任务取消、租约移交或结果写入失败不会丢弃回执。未知消费保守占用预算，可能提前停止重试；不保证供应商计费恰好一次。
+- 模型统计逐次保存到调用账本，包含生成/复查阶段、响应/错误/取消状态及耗时，结构修复重试单独计数。缓存命中率按已知回执的 token 加权计算；供应商缺失或返回不一致的缓存字段时保留 `null`，不当作零命中。新查询接口不改变已有 `RunView.usage` 契约，详见对接约定中的统计口径。
 
 ## 验证
 
@@ -88,3 +91,5 @@ uv run python -m tsz_agent.evaluate --suite evals/example.json
 升级到迁移 `0002` 前停止旧 worker，迁移后再启动新 worker，避免混用旧的预算记账方式。旧 `mcq_zh_en_v1` 步骤快照不会继续调用模型，业务侧需建立新委托。`0002` 的回退在调用账本非空时会拒绝执行，不能为回退删除真实调用回执。
 
 Agent 使用独立数据库和账号，不共享 tsz 业务表权限。Compose 仅是部署模板，本次没有部署服务器或创建远端发布。
+
+模型统计需要显式执行迁移 `0003`。更新时停止 API/worker，执行 `alembic upgrade head` 后启动新版；启动过程不会自动迁移。历史调用的统计保持未知，不推算耗时或缓存量。已有统计数据时 `0003` 会拒绝直接回退，需先保全观测记录。

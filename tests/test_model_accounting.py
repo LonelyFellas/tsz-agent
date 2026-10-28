@@ -81,6 +81,10 @@ async def test_unknown_usage_reserves_output_across_lease_transfer(store, settin
         current = await store.get(run.id)
         assert current.usage.requests == 2 and current.usage.output_tokens == 0
         assert current.usage.cost is None
+        metrics = await store.model_metrics(run.id)
+        assert metrics.observed_calls == 2 and metrics.cache_observed_calls == 0
+        assert metrics.cache_hit_rate is None
+        assert all(call.metrics.outcome == "error" for call in metrics.calls)
     finally:
         await new.close()
 
