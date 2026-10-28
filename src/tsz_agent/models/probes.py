@@ -263,8 +263,10 @@ class ProbeService:
 
     async def run(self, report: ModelProbeReport, context: str) -> None:
         semaphore = asyncio.Semaphore(CONCURRENCY)
+        context_changed = False
 
         async def check(model: ModelProbe) -> None:
+            nonlocal context_changed
             async with semaphore:
                 if not await self.store.record_probe(
                     report.batch_id, model.model_copy(update={"status": "checking"})
@@ -272,7 +274,7 @@ class ProbeService:
                     return
                 _, current_context = await catalog(self.settings)
                 if current_context != context:
-                    await self.store.finish_probe(report.batch_id, interrupted=True)
+                    context_changed = True
                     return
                 await self.store.record_probe(
                     report.batch_id, await probe_one(self.settings, model)
@@ -285,7 +287,9 @@ class ProbeService:
                     group.create_task(check(model))
             completed = True
         finally:
-            await self.store.finish_probe(report.batch_id, interrupted=not completed)
+            await self.store.finish_probe(
+                report.batch_id, interrupted=not completed or context_changed
+            )
 
     async def require_available(self, selection: ModelSelection) -> str:
         packet = await self.store.probe_packet()

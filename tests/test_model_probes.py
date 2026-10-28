@@ -350,6 +350,106 @@ async def test_runtime_failure_uses_actual_dispatch_time_after_probe(store, sett
     await service.start()
     await asyncio.gather(*service.tasks)
     await store.reserve_model_call(run.id, lease.lease_token, uuid4(), 16, 4, 6000)
-    await store.invalidate_probe(choice.usage_model(), process_started, run.id)
+    await store.invalidate_probe(choice.usage_model(), process_started, (run.id, lease.lease_token))
     assert (await service.report()).models[0].status == "unavailable"
     assert (await store.model_selection()).source == "direct"
+
+
+@pytest.mark.integration
+async def test_context_change_keeps_batch_owned_until_inflight_requests_exit(
+    store, settings, monkeypatch
+):
+    import asyncio
+
+    models = [model(i) for i in range(5)]
+    context = ["old"]
+    active = 0
+    calls = 0
+    entered = asyncio.Event()
+    changed_seen = asyncio.Event()
+    slow = asyncio.Event()
+    fast = asyncio.Event()
+    early_finish = []
+
+    async def catalog(_):
+        if context[0] == "new":
+            changed_seen.set()
+        return models, context[0]
+
+    async def check(_, choice):
+        nonlocal active, calls
+        active += 1
+        calls += 1
+        if active == 2:
+            entered.set()
+        try:
+            await (slow if choice.model_id == "model-0" else fast).wait()
+            return choice.model_copy(
+                update={"status": "available", "checked_at": datetime.now(UTC)}
+            )
+        finally:
+            active -= 1
+
+    original = store.finish_probe
+
+    async def finish(*args, **kwargs):
+        if active:
+            early_finish.append(active)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "finish_probe", finish)
+    monkeypatch.setattr(probes, "catalog", catalog)
+    monkeypatch.setattr(probes, "probe_one", check)
+    first, second = ProbeService(settings, store), ProbeService(settings, store)
+    try:
+        old = await first.start()
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        context[0] = "new"
+        fast.set()
+        await asyncio.wait_for(changed_seen.wait(), timeout=2)
+        assert not early_finish
+        duplicate = await second.start()
+        assert duplicate.batch_id == old.batch_id and calls == 2
+        slow.set()
+        await asyncio.gather(*first.tasks, *second.tasks)
+        assert not early_finish
+    finally:
+        slow.set()
+        fast.set()
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.integration
+async def test_old_lease_failure_does_not_use_new_lease_dispatch_time(store, settings, monkeypatch):
+    import asyncio
+
+    from sqlalchemy import text
+
+    async def catalog(_):
+        return [model()], "context"
+
+    async def check(_, choice):
+        return choice.model_copy(update={"status": "available", "checked_at": datetime.now(UTC)})
+
+    monkeypatch.setattr(probes, "catalog", catalog)
+    monkeypatch.setattr(probes, "probe_one", check)
+    choice = ModelSelection(source="opencode", provider_id="test-provider", model_id="model-1")
+    await store.set_model_selection(choice)
+    run = await store.create(CreateRun(external_request_id=uuid4()), uuid4())
+    old = await store.claim(60, 3)
+    started = datetime.now(UTC)
+    await store.reserve_model_call(run.id, old.lease_token, uuid4(), 16, 4, 6000)
+    service = ProbeService(settings, store)
+    await service.start()
+    await asyncio.gather(*service.tasks)
+    async with store.sessions.begin() as session:
+        await session.execute(
+            text("UPDATE agent_runs SET lease_until=now()-interval '1 second' WHERE id=:id"),
+            {"id": run.id},
+        )
+    new = await store.claim(60, 3)
+    assert old.lease_token != new.lease_token
+    await store.reserve_model_call(run.id, new.lease_token, uuid4(), 16, 4, 6000)
+    await store.invalidate_probe(choice.usage_model(), started, (run.id, old.lease_token))
+    assert (await service.report()).models[0].status == "available"

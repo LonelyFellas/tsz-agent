@@ -285,15 +285,18 @@ class Store:
             row.probe_report = {**packet, "report": report.model_dump(mode="json")}
 
     async def invalidate_probe(
-        self, model_name: str, started_at: datetime, run_id: UUID | None
+        self, model_name: str, started_at: datetime, run: tuple[UUID, UUID] | None
     ) -> None:
         async with self.sessions.begin() as session:
             row = await session.get(ModelSetting, 1, with_for_update=True)
             if row is None or row.probe_report is None:
                 return
-            if run_id is not None:
+            if run is not None:
+                run_id, lease_token = run
                 dispatched_at = await session.scalar(
-                    select(func.max(ModelCall.created_at)).where(ModelCall.run_id == run_id)
+                    select(func.max(ModelCall.created_at)).where(
+                        ModelCall.run_id == run_id, ModelCall.lease_token == lease_token
+                    )
                 )
                 if dispatched_at is not None:
                     started_at = dispatched_at
