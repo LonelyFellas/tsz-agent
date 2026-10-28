@@ -18,9 +18,10 @@ from pydantic_ai.usage import RunUsage
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.config import Settings
 from tsz_agent.models.budget import BudgetedModel, CallBudget, MemoryBudget
+from tsz_agent.models.inputs import generation_input, restore_references, review_input
 from tsz_agent.schemas import Proposal, SemanticReview, StrictModel, Usage
 
-PROMPT_VERSION = "mcq_zh_en_v3"
+PROMPT_VERSION = "mcq_zh_en_v4"
 
 
 class GenerationOutput(StrictModel):
@@ -78,12 +79,13 @@ class DeepSeekModel:
 
     @staticmethod
     def prompt(data: dict[str, Any]) -> str:
-        value = json.dumps(data, ensure_ascii=False)
+        value = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         if len(value.encode()) > 100_000:
             raise TaskError("context_too_large")
         return value
 
     async def generate(self, data: dict[str, Any]) -> Proposal:
+        model_input, references = generation_input(data)
         instructions = (
             files("tsz_agent.capabilities.vocabulary_mcq").joinpath("generate.txt").read_text()
         )
@@ -96,9 +98,9 @@ class DeepSeekModel:
         )
         try:
             response = await agent.run(
-                self.prompt(data), usage=self.meter, usage_limits=self.limits
+                self.prompt(model_input), usage=self.meter, usage_limits=self.limits
             )
-            return response.output.proposal
+            return restore_references(response.output.proposal, references)
         except UsageLimitExceeded as exc:
             raise TaskError("model_budget_exceeded") from exc
         except ModelHTTPError as exc:
@@ -123,7 +125,7 @@ class DeepSeekModel:
         )
         try:
             response = await agent.run(
-                self.prompt(data), usage=self.meter, usage_limits=self.limits
+                self.prompt(review_input(data)), usage=self.meter, usage_limits=self.limits
             )
             return response.output
         except UsageLimitExceeded as exc:

@@ -326,16 +326,19 @@ async def test_hard_shortage_already_uses_the_only_supplement(store, settings, c
     assert source.calls == 2 and model.generations == 1
 
 
+@pytest.mark.parametrize("version", ["mcq_zh_en_v2", "mcq_zh_en_v3"])
 async def test_previous_workflow_checkpoint_fails_without_model_calls(
-    store, settings, context, pool
+    store, settings, context, pool, version
 ):
     from tsz_agent.storage import Run
 
     run = await store.create(CreateRun(external_request_id=context.external_request_id), uuid4())
     async with store.sessions.begin() as session:
         row = await session.get(Run, run.id)
-        row.checkpoint = {"prompt_version": "mcq_zh_en_v2"}
+        row.checkpoint = {"prompt_version": version}
     model = Model([])
     await run_once(settings, store, Source(context, pool), lambda _: model)
     assert (await store.get(run.id)).error_code == "workflow_version_changed"
     assert model.generations == 0 and model.reviews == 0
+    async with store.sessions() as session:
+        assert (await session.get(Run, run.id)).checkpoint == {"prompt_version": version}

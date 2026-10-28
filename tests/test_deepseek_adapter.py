@@ -13,14 +13,16 @@ from tsz_agent.models.deepseek import DeepSeekModel
 from tsz_agent.schemas import Usage
 
 
-async def test_real_sdk_serialization_typed_output_and_usage_without_network(settings):
+async def test_real_sdk_serialization_typed_output_and_usage_without_network(
+    settings, generation_data, context, pool
+):
     calls = []
 
     async def respond(request):
         body = json.loads(request.content)
         calls.append(body)
         content = (
-            {"proposal": proposal(["c2", "c3", "c4"]).model_dump(mode="json")}
+            {"proposal": proposal(["c01", "c02", "c03"]).model_dump(mode="json")}
             if len(calls) == 1
             else {"verdict": "needs_revision", "issues": ["题干缺少语境"]}
         )
@@ -55,9 +57,17 @@ async def test_real_sdk_serialization_typed_output_and_usage_without_network(set
         "deepseek-flash", provider=model.provider, profile=model.model.profile
     )
     try:
-        generated = await model.generate({"candidate_pool": ["c2", "c3", "c4"]})
-        reviewed = await model.review({"original_prompt": "开始"})
-        assert len(generated.distractors) == 3
+        generated = await model.generate(generation_data)
+        reviewed = await model.review(
+            {
+                "original_prompt": "开始",
+                "options": [
+                    {"option_id": option, "candidate": c.model_dump(mode="json")}
+                    for option, c in zip("ABCD", [context.target, *pool], strict=True)
+                ],
+            }
+        )
+        assert [c.candidate_ref for c in generated.distractors] == [c.candidate_ref for c in pool]
         assert reviewed.verdict == "needs_revision"
         assert model.usage().requests == 2
         assert model.usage().input_tokens == 80
@@ -67,11 +77,17 @@ async def test_real_sdk_serialization_typed_output_and_usage_without_network(set
         assert all(c["model"] == "deepseek-flash" for c in calls)
         assert all(c["thinking"]["type"] == "disabled" for c in calls)
         assert all("reasoning_effort" not in c for c in calls)
+        outbound = json.dumps(calls, ensure_ascii=False)
+        for candidate in [context.target, *pool]:
+            assert candidate.spelling in outbound and candidate.definition in outbound
+            assert candidate.candidate_ref not in outbound
+            assert str(candidate.source.publication_id) not in outbound
+            assert candidate.content_fingerprint not in outbound
     finally:
         await model.close()
 
 
-async def test_transport_error_is_retryable_without_hidden_sdk_retries(settings):
+async def test_transport_error_is_retryable_without_hidden_sdk_retries(settings, generation_data):
     calls = []
 
     async def unavailable(request):
@@ -93,7 +109,7 @@ async def test_transport_error_is_retryable_without_hidden_sdk_retries(settings)
     )
     try:
         with pytest.raises(TaskError) as caught:
-            await model.generate({"candidate_pool": []})
+            await model.generate(generation_data)
         assert caught.value.code == "model_unavailable"
         assert caught.value.retryable
         assert len(calls) == 1

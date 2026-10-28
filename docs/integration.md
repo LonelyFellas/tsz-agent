@@ -90,6 +90,8 @@ Rust 最终验证在任务独立 Cargo 构建目录执行。此前共享 target 
 
 ### 模型缓存与耗时统计
 
+模型输入使用独立精简视图：来源、发布版本和指纹保存在任务断点，生成阶段以本次请求内的 `c01` 等短编号选择候选，输出还原为原始候选引用后继续执行来源校验。模型仍读取完整的释义、其他释义和拼写变体。输入顺序为候选池、目标上下文、当前有效人工案例；任务和审核事件 ID 不发送给模型。自动前缀缓存只复用计算，不替代发布版本或授权检查。上线和回退须先排空不同提示词版本的在途及待重试任务，详见 [模型输入精简](features/compact-model-input/README.md)。
+
 费用使用独立新契约：`GET /v1/model-costs` 接受相同分页及 `run_id`，返回 `ledger`（原账本）、按 `call_id` 关联的 `costs`、当前筛选全部记录的 `cost_summary`；`GET /v1/model-costs/overview` 返回同一个 `generated_at` 截点的累计/今日/本周/本月统计。金额是十进制字符串 `estimated_cost_cny`，币种固定 CNY，非供应商实际扣费。`priced_calls`、`unknown_calls` 明示覆盖情况；没有调用才返回零，有调用但没有可计价记录时金额为 null。原 `cost` 字段与 v1 账本契约不变。计价与迁移 `0004` 的依据见 [费用统计设计](features/model-cost-overview/README.md)。
 
 admin 账本使用独立服务鉴权的 `GET /v1/model-calls?page=1&page_size=20&run_id=<可选任务UUID>`。`page` 范围 1–1,000,000，`page_size` 范围 1–100；省略 `run_id` 时查询全部调用。返回 `items/total/page/page_size/summary`，汇总覆盖全部筛选结果，不限当前页。只投影调用标识、时间、模型、已知 token、未知费用和观测，不返回提示词、候选池或模型原文。`tsz-rust` 的 `/api/v1/admin/ai-ledger` 用当前超管身份鉴权后访问，浏览器不持有 Agent 服务凭据。跨仓范围与验收见 [超管 AI 账本](features/admin-ai-ledger/README.md)。

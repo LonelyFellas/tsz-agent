@@ -184,9 +184,7 @@ async def test_recall_and_review_share_durable_budget(
                 {"proposal": InsufficientProposal(reasons=["干扰不足"]).model_dump(mode="json")}
             )
         if len(calls) == 2:
-            return completion(
-                {"proposal": proposal([c.candidate_ref for c in extra]).model_dump(mode="json")}
-            )
+            return completion({"proposal": proposal(["c01", "c02", "c03"]).model_dump(mode="json")})
         return completion()
 
     created = await store.create(
@@ -212,6 +210,9 @@ async def test_recall_and_review_share_durable_budget(
             assert result.outcome == "insufficient_candidates"
         else:
             assert result.question.requires_human_review
+            assert [c.candidate_ref for c in result.question.proposal.distractors] == [
+                c.candidate_ref for c in extra
+            ]
         assert len(calls) == expected_calls
         assert (await store.get(created.id)).usage.requests == expected_calls
         assert (await store.get(created.id)).usage.output_tokens == expected_calls * 20
