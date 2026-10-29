@@ -14,8 +14,10 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic import Field
 
+from tsz_agent.chatgpt_auth import AuthStore
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.config import Settings
+from tsz_agent.models import chatgpt
 from tsz_agent.models.opencode import (
     PROBE_OUTPUT_TOKENS,
     SESSION_PROTOCOL,
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
     from tsz_agent.storage import Store
 
 CONCURRENCY = 2
+CHATGPT_CATALOG_TIMEOUT_SECONDS = 5
 PROMPT = "Reply with only OK."
 
 
@@ -80,6 +83,37 @@ async def catalog(settings: Settings) -> tuple[list[ModelProbe], str]:
     ]
     native: list[Any] = []
     integrations: list[Any] = []
+    chatgpt_context: Any = None
+    if settings.chatgpt_enabled:
+        try:
+            async with asyncio.timeout(CHATGPT_CATALOG_TIMEOUT_SECONDS):
+                auth = AuthStore(settings.chatgpt_auth_dir)
+                accounts = await auth.accounts()
+                account = accounts.accounts.get(accounts.active or "")
+                if account and account.public()["plan_enabled"]:
+                    chatgpt_context = {
+                        "client_id": account.client_id,
+                        "session_id": account.session_id,
+                        "subject": account.subject,
+                        "scopes": sorted(account.scopes),
+                        "host_id": accounts.host_id,
+                        "protocol": chatgpt.PROTOCOL,
+                    }
+                    native_chatgpt = await chatgpt.catalog(auth, account.client_id)
+                    models.extend(
+                        ModelProbe(
+                            source="chatgpt",
+                            provider_id=account.client_id,
+                            model_id=m["model_id"],
+                            name=m["name"] + "（ChatGPT）",
+                            enabled=True,
+                        )
+                        for m in native_chatgpt
+                    )
+        except (TaskError, TimeoutError) as exc:
+            # A slow or unavailable personal provider must not hide other platforms.
+            chatgpt_context = chatgpt_context or {}
+            chatgpt_context["error"] = exc.code if isinstance(exc, TaskError) else "timeout"
     if settings.opencode_server_url is not None:
         try:
             async with asyncio.timeout(5), client(settings) as http:
@@ -133,6 +167,7 @@ async def catalog(settings: Settings) -> tuple[list[ModelProbe], str]:
             "gateway_key": fingerprint(settings.opencode_server_password.get_secret_value())
             if settings.opencode_server_password
             else None,
+            "chatgpt": chatgpt_context,
         }
     )
     return models, context
@@ -146,7 +181,30 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
     started = perf_counter()
     try:
         async with asyncio.timeout(settings.request_timeout_seconds):
-            if model.source == "opencode":
+            if model.source == "chatgpt":
+                if not settings.chatgpt_enabled:
+                    result.error = "not_configured"
+                    return result
+                async with httpx.AsyncClient(
+                    timeout=settings.request_timeout_seconds,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as http:
+                    kind, value = await chatgpt.invoke(
+                        http,
+                        AuthStore(settings.chatgpt_auth_dir),
+                        model,
+                        "Reply briefly as plain text.",
+                        PROMPT,
+                    )
+                    if kind != "response.completed":
+                        result.error = "request_failed"
+                        return result
+                    chatgpt.final_text(value)
+                result.http_status = 200
+                result.status = "available"
+                return result
+            elif model.source == "opencode":
                 async with client(settings) as http:
                     await generate_text(http, model, PROMPT, max_output_tokens=PROBE_OUTPUT_TOKENS)
                 result.http_status = 200
@@ -199,7 +257,13 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
         result.http_status = exc.status_code
         result.error = "request_failed"
     except TaskError as exc:
-        if exc.code in {"opencode_not_configured", "opencode_budget_not_configured"}:
+        if exc.code in {
+            "opencode_not_configured",
+            "opencode_budget_not_configured",
+            "chatgpt_login_required",
+            "chatgpt_plan_not_authorized",
+            "chatgpt_not_configured",
+        }:
             result.error = "not_configured"
         elif exc.code in {
             "model_output_invalid",

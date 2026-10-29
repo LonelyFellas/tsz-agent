@@ -83,13 +83,14 @@ async def store() -> AsyncIterator[Store]:
 
 
 @pytest.fixture
-def settings():
+def settings(tmp_path):
     return Settings(
         database_url=SecretStr(
             os.getenv("TEST_DATABASE_URL", "postgresql+psycopg://test@localhost/tsz_agent_test")
         ),
         _env_file=None,
         DEEPSEEK_API_KEY=None,
+        chatgpt_auth_dir=tmp_path / "chatgpt",
         api_token=SecretStr("test-agent-token-" + "x" * 32),
         tsz_base_url="http://tsz.test",
         tsz_service_token=SecretStr("test-tsz-token-" + "x" * 32),

@@ -181,7 +181,7 @@ class RunResult(StrictModel):
 
 
 class ModelSelection(StrictModel):
-    source: Literal["direct", "opencode"] = "direct"
+    source: Literal["direct", "opencode", "chatgpt"] = "direct"
     provider_id: str = Field(
         default="deepseek", min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
     )
@@ -199,7 +199,7 @@ class ModelSelection(StrictModel):
     def usage_model(self) -> str:
         if self.source == "direct":
             return self.model_id
-        return f"opencode/{self.provider_id}/{self.model_id}"
+        return f"{self.source}/{self.provider_id}/{self.model_id}"
 
 
 class Usage(StrictModel):

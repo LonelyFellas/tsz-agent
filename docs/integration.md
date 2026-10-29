@@ -134,6 +134,16 @@ API 的非预期异常在 HTTP 中间件返回脱敏 Problem Details，包含 `x
 
 ## 模型选择与 OpenCode
 
+### 本机 ChatGPT 套餐授权
+
+`source` 另支持 `chatgpt`，`provider_id` 为该本机已授权注册的 `client_id`，`model_id` 为其授权目录中的模型标识。完整账本标识为 `chatgpt/<client_id>/<model_id>`；选择仍须有效探测回执，任务创建后账号与模型都不会随全局选择变化。ChatGPT 登录默认启用，显式设置 `TSZ_AGENT_CHATGPT_ENABLED=false` 可关闭此平台；API/worker 共用 `TSZ_AGENT_CHATGPT_AUTH_DIR`，默认 `~/.config/tsz-agent/chatgpt`。登录与管理命令见 README。
+
+OAuth 使用独立主机 ID、一次性 state/nonce、PKCE S256、loopback 回调，以及官方 JWKS 验证 ID token 的签名、issuer、audience、有效期与 nonce。不同注册的凭据独立保存，跨进程文件锁串行化旋转 refresh token；本机退出保留 client/account 对应关系。无套餐权限只保存登录状态，禁止推理。凭据、授权码与原始上游错误均不进入接口回执或调用账本。此路径不读取 Codex 凭据、不执行模型工具、不转发网页私有接口。
+
+调用仅发送官方个人授权通道接受的文本参数，等待 `response.completed`；`response.failed`、`response.incomplete` 或流中断不能视为成功。完整回执中的已知用量独立结算，包含无效输出及失败终态；缺少回执时继续保留预算占用。缓存字段缺失保持未知，费用为 `null`，不会按普通 API 单价推算套餐成本。预览不支持输出上限字段，因此预算预留不是供应商硬上限；只在已知超额时拒绝结果并阻止后续消费。超时与响应字节上限仍有效。
+
+这是 Agent 内部接口的枚举扩展；配套新版 tsz-rust/tsz 已同步 `chatgpt` 的严格枚举、生成契约和后台账号/模型设置入口。个人本机可通过命令行或配套后台使用，线上实例如需保持 ChatGPT 关闭，显式设置 `TSZ_AGENT_CHATGPT_ENABLED=false`。后台接口、混合版本兼容与实际验证边界见[接入记录](features/chatgpt-admin/README.md)。
+
 新增 `GET/PUT /v1/model-selection`，沿用内部服务 token。`source` 为 `direct` 或 `opencode`，另传 `provider_id`、`model_id`。配置保存在 Agent 数据库，任务创建时固定模型；切换不影响已创建任务或其重试。需显式迁移至 `0005`，API 与 worker 配置同一 `TSZ_AGENT_OPENCODE_SERVER_URL` / `TSZ_AGENT_OPENCODE_SERVER_PASSWORD`。Key 由 tsz-rust 代理到 OpenCode 保存，Agent 不接收服务商 Key。
 
 OpenCode 调用先只读检查 `GET /api/info`，仅允许已核对的 v2.1.4，其他版本或无效版本响应在创建会话前直接拒绝。再通过 `POST /api/session` 创建临时会话，固定任务模型、`variant=default` 和内置 `build` agent，同时设置 `permissions=[{action:"*",resource:"*",effect:"ask"}]`，保留原生工具声明且不授予自动执行权限。核对服务端返回的模型及权限后，只调用 `POST /api/session/{id}/generate` 单次生成文本；该版本的此接口只收集文本，不调用工具执行器或进入工具循环。Agent 不调用 prompt、shell、execute 或权限批准接口，也不解释、执行返回的工具参数。不能把“工具声明存在”当成执行授权；文件、终端、网络等工具均不执行。供应商请求由 OpenCode 自身的原生网络客户端直连，Agent 不转发供应商 HTTP/TLS、不伪造工具或客户端身份。
