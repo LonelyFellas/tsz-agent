@@ -45,7 +45,7 @@ def generation_input(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
                 },
             }
         )
-    return {
+    result = {
         "candidate_pool": [
             {"candidate_ref": alias, **candidate_view(candidate)}
             for alias, candidate in zip(references, pool, strict=True)
@@ -56,7 +56,17 @@ def generation_input(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, st
             "answer_profile": context.answer_profile,
         },
         "reviewed_examples": examples,
-    }, references
+    }
+    feedback = data.get("semantic_feedback")
+    if feedback:
+        result["semantic_feedback"] = {
+            "issues": feedback["issues"],
+            "previous_distractors": [
+                candidate_view(Candidate.model_validate(c))
+                for c in feedback["previous_distractors"]
+            ],
+        }
+    return result, references
 
 
 def restore_references(proposal: Proposal, references: dict[str, str]) -> Proposal:

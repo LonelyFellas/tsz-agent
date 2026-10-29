@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     job_timeout_seconds: int = Field(default=300, ge=30, le=1800)
     max_attempts: int = Field(default=3, ge=1, le=5)
     poll_seconds: float = Field(default=2, ge=0.1, le=60)
-    model_request_limit: int = Field(default=4, ge=2, le=6)
+    model_request_limit: int = Field(default=6, ge=2, le=6)
     output_token_limit: int = Field(default=6000, ge=500, le=12000)
 
     @field_validator("database_url")

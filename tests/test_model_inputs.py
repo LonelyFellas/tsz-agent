@@ -207,7 +207,7 @@ async def test_sdk_projection_round_trip_keeps_authority_checks(
         }
         async with store.sessions() as session:
             checkpoint = (await session.get(Run, run.id)).checkpoint
-        assert checkpoint["prompt_version"] == "mcq_zh_en_v4"
+        assert checkpoint["prompt_version"] == "mcq_zh_en_v5"
         assert checkpoint["pool"] == [c.model_dump(mode="json") for c in pool]
         assert [c["candidate_ref"] for c in checkpoint["proposal"]["distractors"]] == [
             c.candidate_ref for c in pool
@@ -238,3 +238,23 @@ async def test_large_semantic_payload_is_rejected_before_dispatch(settings, gene
         assert model.usage().requests == 0
     finally:
         await model.close()
+
+
+def test_semantic_feedback_keeps_meanings_without_exposing_authoritative_identities(
+    generation_data, pool
+):
+    data = {
+        **generation_data,
+        "semantic_feedback": {
+            "issues": ["原选项仍可能正确"],
+            "previous_distractors": [c.model_dump(mode="json") for c in pool],
+        },
+    }
+    model_input, _ = generation_input(data)
+    feedback = model_input["semantic_feedback"]
+    assert feedback["issues"] == ["原选项仍可能正确"]
+    assert [c["spelling"] for c in feedback["previous_distractors"]] == [c.spelling for c in pool]
+    assert all(
+        "source" not in c and "candidate_ref" not in c and "content_fingerprint" not in c
+        for c in feedback["previous_distractors"]
+    )

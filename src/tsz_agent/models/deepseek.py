@@ -21,7 +21,7 @@ from tsz_agent.models.budget import BudgetedModel, CallBudget, MemoryBudget
 from tsz_agent.models.inputs import generation_input, restore_references, review_input
 from tsz_agent.schemas import Proposal, SemanticReview, StrictModel, Usage
 
-PROMPT_VERSION = "mcq_zh_en_v4"
+PROMPT_VERSION = "mcq_zh_en_v5"
 
 
 class GenerationOutput(StrictModel):

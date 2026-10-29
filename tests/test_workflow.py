@@ -41,7 +41,7 @@ class Model:
         if self.fail_review:
             self.fail_review = False
             raise TaskError("model_unavailable", retryable=True)
-        return SemanticReview(verdict="needs_revision", issues=["应确认语义唯一性"])
+        return SemanticReview(verdict="no_obvious_issue", issues=[])
 
 
 class Source:
@@ -76,7 +76,7 @@ async def test_complete_pipeline_preserves_sources_and_never_approves(
     question = result.result.question
     assert question.prompt == context.target.definition
     assert question.requires_human_review is True
-    assert question.semantic_review.verdict == "needs_revision"
+    assert question.semantic_review.verdict == "no_obvious_issue"
     assert {o.candidate.source.entry_id for o in question.options} == {
         c.source.entry_id for c in [context.target, *pool]
     }
@@ -326,7 +326,7 @@ async def test_hard_shortage_already_uses_the_only_supplement(store, settings, c
     assert source.calls == 2 and model.generations == 1
 
 
-@pytest.mark.parametrize("version", ["mcq_zh_en_v2", "mcq_zh_en_v3"])
+@pytest.mark.parametrize("version", ["mcq_zh_en_v2", "mcq_zh_en_v3", "mcq_zh_en_v4"])
 async def test_previous_workflow_checkpoint_fails_without_model_calls(
     store, settings, context, pool, version
 ):
