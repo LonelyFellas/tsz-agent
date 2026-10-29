@@ -289,6 +289,20 @@ async def test_reauthorization_invalidates_probe_but_token_rotation_does_not(
     assert (await probes.catalog(settings))[1] != original
 
 
+async def test_slow_chatgpt_catalog_does_not_block_other_platforms(settings, tmp_path, monkeypatch):
+    settings = settings.model_copy(update={"chatgpt_enabled": True, "chatgpt_auth_dir": tmp_path})
+    await save_account(AuthStore(tmp_path))
+
+    async def slow_catalog(*_):
+        await asyncio.sleep(1)
+        return []
+
+    monkeypatch.setattr(probes, "CHATGPT_CATALOG_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(chatgpt, "catalog", slow_catalog)
+    models, _ = await probes.catalog(settings)
+    assert len(models) == 1 and models[0].source == "direct"
+
+
 @pytest.mark.integration
 async def test_api_requires_probe_and_pins_account_model_for_worker(
     store, settings, tmp_path, monkeypatch

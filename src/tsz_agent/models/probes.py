@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from tsz_agent.storage import Store
 
 CONCURRENCY = 2
+CHATGPT_CATALOG_TIMEOUT_SECONDS = 5
 PROMPT = "Reply with only OK."
 
 
@@ -84,34 +85,35 @@ async def catalog(settings: Settings) -> tuple[list[ModelProbe], str]:
     integrations: list[Any] = []
     chatgpt_context: Any = None
     if settings.chatgpt_enabled:
-        auth = AuthStore(settings.chatgpt_auth_dir)
-        accounts = await auth.accounts()
-        account = accounts.accounts.get(accounts.active or "")
-        if account and account.public()["plan_enabled"]:
-            chatgpt_context = {
-                "client_id": account.client_id,
-                "session_id": account.session_id,
-                "subject": account.subject,
-                "scopes": sorted(account.scopes),
-                "host_id": accounts.host_id,
-                "protocol": chatgpt.PROTOCOL,
-            }
-            try:
-                native_chatgpt = await chatgpt.catalog(auth, account.client_id)
-            except TaskError as exc:
-                # A stale personal login must not hide independently configured providers.
-                native_chatgpt = []
-                chatgpt_context["error"] = exc.code
-            models.extend(
-                ModelProbe(
-                    source="chatgpt",
-                    provider_id=account.client_id,
-                    model_id=m["model_id"],
-                    name=m["name"] + "（ChatGPT）",
-                    enabled=True,
-                )
-                for m in native_chatgpt
-            )
+        try:
+            async with asyncio.timeout(CHATGPT_CATALOG_TIMEOUT_SECONDS):
+                auth = AuthStore(settings.chatgpt_auth_dir)
+                accounts = await auth.accounts()
+                account = accounts.accounts.get(accounts.active or "")
+                if account and account.public()["plan_enabled"]:
+                    chatgpt_context = {
+                        "client_id": account.client_id,
+                        "session_id": account.session_id,
+                        "subject": account.subject,
+                        "scopes": sorted(account.scopes),
+                        "host_id": accounts.host_id,
+                        "protocol": chatgpt.PROTOCOL,
+                    }
+                    native_chatgpt = await chatgpt.catalog(auth, account.client_id)
+                    models.extend(
+                        ModelProbe(
+                            source="chatgpt",
+                            provider_id=account.client_id,
+                            model_id=m["model_id"],
+                            name=m["name"] + "（ChatGPT）",
+                            enabled=True,
+                        )
+                        for m in native_chatgpt
+                    )
+        except (TaskError, TimeoutError) as exc:
+            # A slow or unavailable personal provider must not hide other platforms.
+            chatgpt_context = chatgpt_context or {}
+            chatgpt_context["error"] = exc.code if isinstance(exc, TaskError) else "timeout"
     if settings.opencode_server_url is not None:
         try:
             async with asyncio.timeout(5), client(settings) as http:

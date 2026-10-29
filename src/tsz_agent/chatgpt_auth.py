@@ -30,6 +30,8 @@ AUTHORIZE = ISSUER + "/api/accounts/authorize"
 TOKEN = ISSUER + "/api/accounts/oauth/token"
 PLAN_SCOPE = "chatgpt.tokens.use.direct"
 SCOPES = "openid profile email offline_access resource.invoke " + PLAN_SCOPE
+LOCK_TIMEOUT_SECONDS = 5
+REVOCATION_TIMEOUT_SECONDS = 5
 
 
 def auth_directory() -> Path:
@@ -88,7 +90,7 @@ class AuthStore:
         except OSError as exc:
             raise TaskError("chatgpt_credentials_unavailable") from exc
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(LOCK_TIMEOUT_SECONDS):
                 while True:
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -96,6 +98,8 @@ class AuthStore:
                     except BlockingIOError:
                         await asyncio.sleep(0.05)
             yield
+        except TimeoutError as exc:
+            raise TaskError("chatgpt_credentials_busy", retryable=True) from exc
         finally:
             os.close(fd)
 
@@ -203,7 +207,7 @@ class AuthStore:
             revoked = account.refresh_token is None
             try:
                 if account.refresh_token:
-                    async with http_client() as http:
+                    async with asyncio.timeout(REVOCATION_TIMEOUT_SECONDS), http_client() as http:
                         discovery = await get_json(
                             http, ISSUER + "/.well-known/openid-configuration"
                         )
@@ -229,7 +233,7 @@ class AuthStore:
                                     break
                             if attempt < 2:
                                 await asyncio.sleep(0.2 * (attempt + 1))
-            except (TaskError, KeyError, TypeError):
+            except (TaskError, KeyError, TypeError, TimeoutError):
                 pass
             clear_tokens(account)
             self.write(data)

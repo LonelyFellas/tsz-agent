@@ -296,6 +296,38 @@ async def test_credentials_refuse_symlinks_and_readable_token_files(tmp_path):
     assert target.read_text() == "do not read"
 
 
+async def test_logout_remote_deadline_still_clears_local_tokens(tmp_path, monkeypatch):
+    store = auth.AuthStore(tmp_path)
+    await save_account(store)
+    entered = asyncio.Event()
+
+    async def respond(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"revocation_endpoint": auth.ISSUER + "/revoke"})
+        entered.set()
+        await asyncio.sleep(1)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(auth, "REVOCATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        auth, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    )
+    assert await store.logout("oaiapp_fixture") is False
+    assert entered.is_set()
+    account = (await store.accounts()).accounts["oaiapp_fixture"]
+    assert account.access_token is None and account.refresh_token is None
+
+
+async def test_busy_credential_lock_returns_bounded_retryable_error(tmp_path, monkeypatch):
+    owner, waiter = auth.AuthStore(tmp_path), auth.AuthStore(tmp_path)
+    monkeypatch.setattr(auth, "LOCK_TIMEOUT_SECONDS", 0.01)
+    async with owner.locked():
+        with pytest.raises(TaskError, match="chatgpt_credentials_busy") as error:
+            await waiter.accounts()
+        assert error.value.retryable
+    assert not (await waiter.accounts()).accounts
+
+
 @pytest.mark.parametrize("failure", ["denied", "client_mismatch", "identity_mismatch", "unsigned"])
 async def test_failed_reauthorization_never_replaces_active_credentials(
     tmp_path, monkeypatch, signing_key, failure
