@@ -19,7 +19,10 @@ from tsz_agent.models.deepseek import DeepSeekModel, GenerationOutput
 from tsz_agent.models.inputs import generation_input, restore_references, review_input
 from tsz_agent.schemas import ModelCallMetrics, ModelSelection, Proposal, SemanticReview, Usage
 
-SESSION_PROTOCOL = "session-generate-no-execution-v2"
+SESSION_PROTOCOL = "session-generate-budget-v3"
+BUDGET_PLUGIN = "tsz.agent.session-budget-v1"
+OUTPUT_TOKENS = 3000
+PROBE_OUTPUT_TOKENS = 256
 # Ask preserves native tool declarations. This client never approves permissions or runs a tool loop.
 TOOL_PERMISSIONS = [{"action": "*", "resource": "*", "effect": "ask"}]
 
@@ -100,11 +103,29 @@ async def remove_session(http: httpx.AsyncClient, identifier: str) -> None:
         raise TaskError("opencode_session_cleanup_failed", retryable=True) from exc
 
 
-async def generate_text(http: httpx.AsyncClient, selection: ModelSelection, prompt: str) -> str:
+async def generate_text(
+    http: httpx.AsyncClient,
+    selection: ModelSelection,
+    prompt: str,
+    *,
+    max_output_tokens: int = OUTPUT_TOKENS,
+) -> str:
     # The no-execution guarantee is verified against this native session.generate implementation.
     info = await request(http, "GET", "/api/info", unwrap=False)
     if not isinstance(info, dict) or info.get("version") != "2.1.4":
         raise TaskError("opencode_version_unsupported")
+    plugins = await request(http, "GET", "/api/plugin")
+    if not isinstance(plugins, list) or not any(
+        isinstance(p, dict)
+        and p.get("id") == BUDGET_PLUGIN
+        and isinstance(p.get("state"), dict)
+        and p["state"].get("status") == "active"
+        for p in plugins
+    ):
+        raise TaskError("opencode_budget_not_configured")
+    if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= OUTPUT_TOKENS:
+        raise TaskError("model_budget_exceeded")
+    metadata = {"tszAgent": {"protocol": SESSION_PROTOCOL, "maxOutputTokens": max_output_tokens}}
     model = {"providerID": selection.provider_id, "id": selection.model_id, "variant": "default"}
 
     async def create() -> Any:
@@ -118,6 +139,7 @@ async def generate_text(http: httpx.AsyncClient, selection: ModelSelection, prom
                     "agent": "build",
                     "model": model,
                     "permissions": TOOL_PERMISSIONS,
+                    "metadata": metadata,
                 },
             )
 
@@ -135,18 +157,17 @@ async def generate_text(http: httpx.AsyncClient, selection: ModelSelection, prom
             identifier is None
             or value.get("model") != model
             or value.get("permissions") != TOOL_PERMISSIONS
+            or value.get("metadata") != metadata
         ):
             raise TaskError("model_output_invalid")
         # This API prepares normal session context but never executes the returned tool calls.
         value = await request(
             http, "POST", f"/api/session/{identifier}/generate", {"prompt": prompt}
         )
-        if (
-            not isinstance(value, dict)
-            or not isinstance(value.get("text"), str)
-            or not value["text"].strip()
-        ):
+        if not isinstance(value, dict) or not isinstance(value.get("text"), str):
             raise TaskError("model_output_invalid")
+        if not value["text"].strip():
+            raise TaskError("model_response_empty")
         failed = False
         return str(value["text"])
     finally:
@@ -200,13 +221,14 @@ class OpenCodeModel:
             + DeepSeekModel.prompt(data)
         )
         call_id = uuid4()
-        # v2.1.4 session.generate exposes neither usage nor a per-call token cap. Keep the reservation
-        # held; never fabricate usage or apply DeepSeek prices to gateway calls.
-        await self.budget.reserve(call_id, 3000)
+        # The native plugin applies this allowance; missing usage keeps the reservation held.
+        allowance = await self.budget.reserve(call_id, OUTPUT_TOKENS)
         outcome: Literal["response", "error", "cancelled"] = "error"
         started = perf_counter()
         try:
-            value = await generate_text(self.http, self.selection, prompt)
+            value = await generate_text(
+                self.http, self.selection, prompt, max_output_tokens=allowance
+            )
             outcome = "response"
             try:
                 return schema.model_validate_json(value)
@@ -214,6 +236,10 @@ class OpenCodeModel:
                 raise TaskError("model_output_invalid") from exc
         except asyncio.CancelledError:
             outcome = "cancelled"
+            raise
+        except TaskError as exc:
+            if exc.code == "model_response_empty":
+                outcome = "response"
             raise
         finally:
             task = asyncio.create_task(

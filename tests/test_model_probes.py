@@ -70,6 +70,13 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
         calls.append((request.method, request.url.path, body))
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         if request.method == "DELETE":
             return httpx.Response(204)
         if request.url.path == "/api/session":
@@ -96,6 +103,7 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
     assert result.duration_ms >= 0 and result.checked_at is not None
     assert calls == [
         ("GET", "/api/info", None),
+        ("GET", "/api/plugin", None),
         (
             "POST",
             "/api/session",
@@ -104,6 +112,9 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
                 "agent": "build",
                 "model": {"providerID": "test-provider", "id": "model-1", "variant": "default"},
                 "permissions": TOOL_PERMISSIONS,
+                "metadata": {
+                    "tszAgent": {"protocol": probes.SESSION_PROTOCOL, "maxOutputTokens": 256}
+                },
             },
         ),
         ("POST", "/api/session/ses_probe/generate", {"prompt": probes.PROMPT}),

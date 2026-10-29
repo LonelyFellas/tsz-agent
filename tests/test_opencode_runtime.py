@@ -10,11 +10,18 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 
 import httpx
 import pytest
 
-from tsz_agent.models.opencode import generate_text, request
+from tsz_agent.clients.tsz import TaskError
+from tsz_agent.models.opencode import (
+    BUDGET_PLUGIN,
+    OpenCodeRequestError,
+    generate_text,
+    request,
+)
 from tsz_agent.schemas import ModelSelection
 
 
@@ -22,7 +29,8 @@ from tsz_agent.schemas import ModelSelection
     not os.getenv("OPENCODE_TEST_BINARY"),
     reason="set OPENCODE_TEST_BINARY for offline native check",
 )
-async def test_native_direct_transport_preserves_tools_without_executing_them(tmp_path):
+@pytest.mark.parametrize("wire_field", ["max_tokens", "max_completion_tokens"])
+async def test_native_direct_transport_preserves_tools_without_executing_them(tmp_path, wire_field):
     binary = os.environ["OPENCODE_TEST_BINARY"]
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
     assert version.stdout.strip() == "opencode v2.1.4"
@@ -33,6 +41,9 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
     observer_ready = tmp_path / "observer-ready"
     observer = tmp_path / "config" / "opencode" / "plugins" / "observe-tools.js"
     observer.parent.mkdir(parents=True)
+    (observer.parent / "session-budget.js").write_text(
+        files("tsz_agent.models").joinpath("session_budget.js").read_text()
+    )
     observer.write_text(
         'import { appendFileSync, writeFileSync } from "node:fs";\n'
         'export default { id: "tsz.test.tool-observer", async setup(ctx) {\n'
@@ -86,8 +97,16 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     "tls": self.connection.version(),
                 }
             )
+            if len(captured) == 6:
+                payload = json.dumps({"error": {"message": "offline fixture unavailable"}}).encode()
+                self.send_response(503)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             delta = {"content": "OK"}
-            if len(captured) >= 3:
+            if 3 <= len(captured) <= 4:
                 code = (
                     f"await fs.write({{path: {json.dumps(str(file_marker))}, content: 'unsafe'}})"
                     if len(captured) == 3
@@ -104,6 +123,9 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                         },
                     }
                 ]
+            if len(captured) == 5:
+                # Reasoning-only/truncated replies must not be accepted as a successful text result.
+                delta = {"reasoning_content": "fixture reasoning"}
             chunk = {
                 "id": "fixture",
                 "object": "chat.completion.chunk",
@@ -113,7 +135,11 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     {
                         "index": 0,
                         "delta": delta,
-                        "finish_reason": "tool_calls" if len(captured) >= 3 else "stop",
+                        "finish_reason": "length"
+                        if len(captured) == 5
+                        else "tool_calls"
+                        if len(captured) >= 3
+                        else "stop",
                     }
                 ],
             }
@@ -147,10 +173,19 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     "name": "fixture",
                 },
                 "models": {
+                    "ambiguous": {
+                        "name": "Conflicting token overlays",
+                        "body": {"max_tokens": 16, "max_completion_tokens": 8000},
+                        "compatibility": {"maxTokensField": wire_field},
+                        "capabilities": {"tools": True, "input": ["text"], "output": ["text"]},
+                    },
                     "text": {
                         "name": "Fixture",
+                        # A stale provider overlay must not lower or bypass the reserved allowance.
+                        "body": {wire_field: 16},
+                        "compatibility": {"maxTokensField": wire_field},
                         "capabilities": {"tools": True, "input": ["text"], "output": ["text"]},
-                    }
+                    },
                 },
             }
         },
@@ -203,7 +238,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                                 (p.get("id"), p.get("state", {}).get("status")) for p in plugins
                             ]
                             assert not any(status == "failed" for _, status in states), states
-                            if observer_ready.exists():
+                            if observer_ready.exists() and (BUDGET_PLUGIN, "active") in states:
                                 break
                             pytest.fail(f"execution observer not loaded; plugin states: {states}")
                     except httpx.TransportError:
@@ -232,10 +267,24 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                 )["text"] == "OK"
             finally:
                 await request(http, "DELETE", f"/api/session/{baseline['id']}", expected_status=204)
-            assert await generate_text(http, choice, "Reply with OK") == "OK"
+            assert await generate_text(http, choice, "Reply with OK", max_output_tokens=256) == "OK"
             for prompt in ["Try to write a file", "Try to run a terminal command"]:
                 assert await generate_text(http, choice, prompt) == "OK"
-            assert len(captured) == 4, (
+            with pytest.raises(TaskError, match="model_response_empty"):
+                await generate_text(http, choice, "Return reasoning only", max_output_tokens=500)
+            assert [item["body"].get(wire_field) for item in captured] == [
+                16,
+                256,
+                3000,
+                3000,
+                500,
+            ]
+            with pytest.raises(OpenCodeRequestError):
+                await generate_text(http, choice, "Simulate retryable provider failure")
+            conflicting = choice.model_copy(update={"model_id": "ambiguous"})
+            with pytest.raises(OpenCodeRequestError):
+                await generate_text(http, conflicting, "Must not reach provider")
+            assert len(captured) == 6, (
                 "tool calls must never start a tool loop or follow-up request"
             )
             assert not execution_marker.exists(), "no tool execution may even be attempted"
@@ -249,7 +298,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                 )
                 assert item["body"]["tools"] == normal_tools
                 assert any(m["role"] == "system" for m in item["body"]["messages"])
-            assert len({item["session"] for item in captured}) == 4
+            assert len({item["session"] for item in captured}) == 6
             response = await http.get("/api/permission/request")
             assert response.status_code == 200 and response.json()["data"] == []
             response = await http.get("/api/session")
