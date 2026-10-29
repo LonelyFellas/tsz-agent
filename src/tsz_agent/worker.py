@@ -11,6 +11,7 @@ from tsz_agent.capabilities.vocabulary_mcq.workflow import execute
 from tsz_agent.clients.tsz import TaskError, TszClient
 from tsz_agent.config import Settings
 from tsz_agent.models.budget import StoreBudget
+from tsz_agent.models.chatgpt import ChatGPTModel
 from tsz_agent.models.deepseek import DeepSeekModel, QuestionModel
 from tsz_agent.models.opencode import (
     FLINT_JOB_TIMEOUT_SECONDS,
@@ -55,6 +56,13 @@ async def run_once(
             )
             if factory:
                 model = factory(previous)
+            elif previous.model.startswith("chatgpt/"):
+                _, client_id, model_id = previous.model.split("/", 2)
+                model = ChatGPTModel(
+                    settings,
+                    ModelSelection(source="chatgpt", provider_id=client_id, model_id=model_id),
+                    budget,
+                )
             elif previous.model.startswith("opencode/"):
                 _, provider_id, model_id = previous.model.split("/", 2)
                 model = OpenCodeModel(
@@ -90,6 +98,11 @@ async def run_once(
                 "opencode_budget_not_configured",
                 "model_output_invalid",
                 "model_response_empty",
+                "chatgpt_login_required",
+                "chatgpt_plan_not_authorized",
+                "chatgpt_usage_limit_exceeded",
+                "chatgpt_access_denied",
+                "chatgpt_unavailable",
             }:
                 await store.invalidate_probe(previous.model, started_at, (run.id, token))
             await store.fail(run.id, token, exc.code, exc.retryable, settings.max_attempts)
@@ -127,15 +140,19 @@ async def run_once(
         renewal.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await renewal
-        if isinstance(model, (DeepSeekModel, OpenCodeModel)):
+        if isinstance(model, (DeepSeekModel, OpenCodeModel, ChatGPTModel)):
             await model.close()
     return True
 
 
 async def main() -> None:
     settings = Settings()
-    if settings.deepseek_api_key is None and settings.opencode_server_url is None:
-        raise SystemExit("DeepSeek or OpenCode must be configured for the worker")
+    if (
+        settings.deepseek_api_key is None
+        and settings.opencode_server_url is None
+        and not settings.chatgpt_enabled
+    ):
+        raise SystemExit("DeepSeek, OpenCode or ChatGPT must be configured for the worker")
     store = Store(settings.database_url.get_secret_value())
     try:
         await store.ready()

@@ -24,7 +24,39 @@ uv run uvicorn tsz_agent.app:create_app --factory --host 127.0.0.1 --port 8390
 uv run python -m tsz_agent.worker
 ```
 
-启动 API/worker 不自动迁移。worker 未配置模型密钥会直接退出；`/readyz` 只检查 API 数据库及表可用，不代表词库接口或模型已联通。
+启动 API/worker 不自动迁移。worker 需要配置 DeepSeek、OpenCode 或启用 ChatGPT；`/readyz` 只检查 API 数据库及表可用，不代表词库接口或模型已联通。
+
+## 本机 ChatGPT 账号登录
+
+支持 DeepSeek、OpenCode 和个人 ChatGPT 账号并存。ChatGPT 通过官方 Sign in with ChatGPT 授权套餐调用，不需要 OpenAI API Key，也不读取 Codex 的登录凭据。配套新版后台提供「系统设置 → AI 账本 → 模型与账号」入口，可登录、查看/切换/退出账号，并探测及选择 ChatGPT 模型；也可使用本机命令行。三端接口、权限与兼容说明见[后台登录接入记录](docs/features/chatgpt-admin/README.md)。
+
+```sh
+uv run python -m tsz_agent.auth login chatgpt
+uv run python -m tsz_agent.auth status chatgpt
+uv run python -m tsz_agent.auth models chatgpt
+```
+
+在本机浏览器完成账号登录与套餐使用授权。默认凭据目录为 `~/.config/tsz-agent/chatgpt`，目录权限 `0700`，凭据文件 `0600`，不要提交或共享。可用 `--auth-dir /absolute/private/path` 或环境变量 `TSZ_AGENT_CHATGPT_AUTH_DIR` 指定独立目录；从 `.env` 加载该变量时命令需加 `uv run --env-file .env`。API 与 worker 必须使用同一目录。
+
+ChatGPT 登录默认启用，无需额外设置环境变量；如需关闭，在 `.env` 设置 `TSZ_AGENT_CHATGPT_ENABLED=false` 后重启 API/worker。模型目录来自当前账号的授权结果，不硬编码模型名；先调用 `POST /v1/model-probes` 显式探测，待 `GET /v1/model-probes` 中相应模型为 `available`，再用已有 `PUT /v1/model-selection` 选择：
+
+```json
+{"source":"chatgpt","provider_id":"<已登录账号的 client_id>","model_id":"<目录返回的 model_id>"}
+```
+
+内部接口继续要求 `TSZ_AGENT_API_TOKEN`。模型列表不等于推理成功；探测会使用套餐额度。可用下面的命令管理多个已授权账号，`--account` 使用 `status` 返回的 `client_id`：
+
+```sh
+uv run python -m tsz_agent.auth login chatgpt --account <client_id>
+uv run python -m tsz_agent.auth use chatgpt --account <client_id>
+uv run python -m tsz_agent.auth logout chatgpt --account <client_id>
+```
+
+`login` 不指定账号时添加账号，指定时重新授权原账号；只有身份验证成功才替换凭据。切换账号后重新探测与选择，任务创建时固定账号和模型，旧任务继续绑定原账号。退出会尝试远端撤销，再清除本地 token，保留注册关系；远端撤销未确认会明确提示。登录过期、撤销、无套餐授权或额度耗尽时停止该路径，不自动更换账号或切到付费 API。
+
+ChatGPT 路径使用 `store=false` 的流式 Responses API，不执行工具，只接受最终完成事件中的文本 JSON。已知 token 与缓存回执写入原有账本，套餐费用保持 `null`。当前官方预览不支持 `max_output_tokens`，本地预算只能限制后续调用并在回执超额时拒绝结果，**不能保证供应商单次硬 token 上限**；超时、断流及取消也不代表未消费额度。请在 [ChatGPT Usage](https://chatgpt.com/settings/usage) 设置应用使用限制。
+
+该实现用于符合官方条件的个人本地/自托管使用；商业或远程托管应用须另行确认接入资格。协议依据：[官方授权流程](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[套餐调用限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)。服务器继续使用原已选择的模型；需要关闭 ChatGPT 登录入口时显式设置 `TSZ_AGENT_CHATGPT_ENABLED=false`。本次无需新增数据库迁移。
 
 ## 接口
 

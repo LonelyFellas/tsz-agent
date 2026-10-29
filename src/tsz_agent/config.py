@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     deepseek_model: Literal["deepseek-flash"] = "deepseek-flash"
     opencode_server_url: AnyHttpUrl | None = None
     opencode_server_password: SecretStr | None = None
+    chatgpt_enabled: bool = True
+    chatgpt_auth_dir: Path = Field(
+        default_factory=lambda: Path("~/.config/tsz-agent/chatgpt").expanduser()
+    )
     lease_seconds: int = Field(default=180, ge=30, le=1800)
     request_timeout_seconds: int = Field(default=90, ge=5, le=600)
     job_timeout_seconds: int = Field(default=300, ge=30, le=1800)

@@ -12,6 +12,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
+from tsz_agent.chatgpt_auth import AuthStore
+from tsz_agent.chatgpt_login import (
+    ChatGPTAccountInput,
+    ChatGPTAccounts,
+    ChatGPTLogin,
+    ChatGPTLoginService,
+    ChatGPTLoginStatus,
+    ChatGPTLogout,
+)
 from tsz_agent.config import Settings
 from tsz_agent.models.probes import ModelProbeReport, ProbeService
 from tsz_agent.schemas import (
@@ -40,13 +49,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     store = store or Store(settings.database_url.get_secret_value())
 
     probes = ProbeService(settings, store)
+    chatgpt = ChatGPTLoginService(AuthStore(settings.chatgpt_auth_dir), settings.chatgpt_enabled)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await probes.close()
-        if owned_store:
-            await store.close()
+        try:
+            yield
+        finally:
+            await chatgpt.close()
+            await probes.close()
+            if owned_store:
+                await store.close()
 
     app = FastAPI(
         title="TSZ Agent",
@@ -63,6 +76,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         },
     )
     bearer = HTTPBearer(auto_error=False)
+
+    from tsz_agent.clients.tsz import TaskError
+
+    @app.exception_handler(TaskError)
+    async def task_error_response(request: Request, exc: TaskError) -> JSONResponse:
+        return await problem_response(request, Problem(503 if exc.retryable else 422, exc.code))
 
     async def authorized(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
@@ -82,6 +101,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except Exception as exc:
             response = await unexpected_response(request, exc)
         response.headers["x-request-id"] = request.state.request_id
+        if request.url.path.startswith("/v1/chatgpt"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.exception_handler(Problem)
@@ -128,6 +149,34 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise Problem(503, "database_unavailable") from exc
         return {"status": "ready"}
 
+    @app.get("/v1/chatgpt/accounts", dependencies=[Depends(authorized)])
+    async def chatgpt_accounts() -> ChatGPTAccounts:
+        return await chatgpt.accounts()
+
+    @app.post("/v1/chatgpt/login", dependencies=[Depends(authorized)])
+    async def chatgpt_login(body: ChatGPTAccountInput) -> ChatGPTLogin:
+        return await chatgpt.start(body.client_id)
+
+    @app.get("/v1/chatgpt/login/{attempt_id}", dependencies=[Depends(authorized)])
+    async def chatgpt_login_status(attempt_id: UUID) -> ChatGPTLoginStatus:
+        return chatgpt.status(attempt_id)
+
+    @app.delete("/v1/chatgpt/login/{attempt_id}", dependencies=[Depends(authorized)])
+    async def chatgpt_cancel_login(attempt_id: UUID) -> ChatGPTLoginStatus:
+        return await chatgpt.cancel(attempt_id)
+
+    @app.put("/v1/chatgpt/account", dependencies=[Depends(authorized)])
+    async def chatgpt_use_account(body: ChatGPTAccountInput) -> ChatGPTAccounts:
+        chatgpt.require_enabled()
+        if body.client_id is None:
+            raise Problem(422, "chatgpt_account_not_found")
+        return await chatgpt.activate(body.client_id)
+
+    @app.delete("/v1/chatgpt/accounts/{client_id}", dependencies=[Depends(authorized)])
+    async def chatgpt_logout(client_id: str) -> ChatGPTLogout:
+        chatgpt.require_enabled()
+        return await chatgpt.logout(client_id)
+
     @app.get("/v1/model-probes", dependencies=[Depends(authorized)])
     async def get_model_probes() -> ModelProbeReport:
         from tsz_agent.clients.tsz import TaskError
@@ -165,7 +214,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 or not settings.deepseek_api_key.get_secret_value()
             ):
                 raise Problem(422, "model_not_configured")
-        else:
+        elif body.source == "opencode":
             try:
                 await OpenCodeModel.validate_selection(settings, body)
             except TaskError as exc:
