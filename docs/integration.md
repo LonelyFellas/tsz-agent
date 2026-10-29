@@ -140,6 +140,10 @@ OpenCode 调用先只读检查 `GET /api/info`，仅允许已核对的 v2.1.4，
 
 生成与复查分别使用独立会话，成功、错误及取消后均尝试删除；创建中取消会等待创建结束再清理，删除有独立超时，清理失败只记录安全错误码并拒绝将成功结果标记为通过。会话生成不追加对话历史，不复用其他任务的上下文。执行隔离依赖已核对的 v2.1.4 `session.generate` 语义，升级 OpenCode 前必须重跑原生离线验收；不能直接将它替换成会运行工具循环的接口。
 
-模型探测复用同一路径，生成协议版本纳入探测指纹，使旧无会话或 deny-all 探测结果失效；不会自动重新探测或切换模型。`session.generate` 仍只返回文本，不提供 Token/费用或单次 Token 上限。账本保留未知用量和费用；调度保留预算预留，不把预留视作上游消费硬限制。付费上限须在服务商设置。配套界面、发布与回退说明在 tsz 仓库 `docs/features/opencode-models/README.md`。
+模型探测复用同一路径，生成协议版本纳入探测指纹，升级后旧探测结果失效；不会自动重新探测或切换模型。v2.1.4 的 `session.generate` 请求只接受提示词，输出上限通过原生插件应用，不向接口传无效的 `max_tokens` 参数。部署前将本仓 `src/tsz_agent/models/session_budget.js` 安装到该私有 OpenCode 实例的 `$XDG_CONFIG_HOME/opencode/plugins/session-budget.js`（未设置 XDG 时使用其配置目录）。仅支持 v2.1.4；插件必须在默认服务上下文中显示为 `tsz.agent.session-budget-v1 / active`，否则在创建会话及推理前返回 `opencode_budget_not_configured`。API/worker 镜像与插件须作为同一版本发布，不会由应用自动安装或更新插件。
 
-离线原生验收可显式设置 `OPENCODE_TEST_BINARY=/absolute/path/to/opencode` 运行 `uv run pytest -q tests/test_opencode_runtime.py`，仅接受 v2.1.4。测试使用隔离的 HOME、配置、数据库及本地 HTTPS 假供应商，关闭模型目录联网刷新与自动升级；macOS 另限制进程只能连接 loopback。测试仅在该隔离进程中信任临时测试证书，不关闭 TLS 证书校验。验证 OpenCode 原生客户端直接建立 TLS、会话身份与系统上下文正常、工具声明与普通 Build 会话完全一致；供应商返回已声明的文件或终端工具调用时，执行前探针始终为零、文件无变化、不产生工具循环的后续请求或待批准请求，且会话被删除。它不使用真实账户或模型，不证明免费模型实际可用。
+调用前预留单次最多 3000 输出 token，剩余任务预算更小时使用实际批准额度；默认任务总预算 6000 不变，生成与复查共享预算。探测上限为 256。额度写入临时会话的 `metadata.tszAgent`，创建后核对；插件在原生 `generate` hook 设置 `maxTokens`，并在最终 HTTP 请求发出前覆盖实际 token 字段，避免提供商 body 配置覆盖额度。支持 `max_tokens`、`max_completion_tokens`、`max_output_tokens` 或 `generationConfig.maxOutputTokens`，字段缺失或多个协议字段冲突时直接拒绝发送。插件不改变目标 URL、工具声明或 TLS 客户端，没有转发服务器；每个受控会话最多发出一次供应商请求，原生内部重试被阻止。附加工具执行前拒绝作为保护，正常调用仍只走不执行工具的 `session.generate`。
+
+HTTP 成功但正文为空或只有空白时返回独立的 `model_response_empty`，不将 reasoning 或工具参数当作正文，不自动重试。worker 将该失败使旧可用探测回执失效；迟到错误不会撤销更新的成功回执。账本记为已收到响应，Token/费用未知保持 null，未知用量仍占用预留额度。该接口不返回结束原因，不能仅凭空正文断言必然是 token 截断；非空但非法 JSON 仍返回 `model_output_invalid`。付费上限须在服务商设置。配套界面、发布与回退说明在 tsz 仓库 `docs/features/opencode-models/README.md`。
+
+离线原生验收可显式设置 `OPENCODE_TEST_BINARY=/absolute/path/to/opencode` 运行 `uv run pytest -q tests/test_opencode_runtime.py`，仅接受 v2.1.4。测试使用隔离的 HOME、配置、数据库及本地 HTTPS 假供应商，关闭模型目录联网刷新与自动升级；macOS 另限制进程只能连接 loopback。测试仅在该隔离进程中信任临时测试证书，不关闭 TLS 证书校验。验证 OpenCode 原生客户端直接建立 TLS、最终请求的上限等于批准额度（覆盖旧 body 配置）、仅 reasoning/截断且正文为空的回复被拒绝、会话身份与系统上下文正常、工具声明与普通 Build 会话完全一致；供应商返回已声明的文件或终端工具调用时，执行前探针始终为零、文件无变化、不产生工具循环的后续请求或待批准请求，且会话被删除。它不使用真实账户或模型，不证明免费模型实际可用。

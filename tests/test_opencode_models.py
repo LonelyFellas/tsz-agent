@@ -30,6 +30,13 @@ async def test_gateway_uses_selected_model_scoped_refs_and_unknown_usage(
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         if request.method == "DELETE":
             return httpx.Response(204)
         body = json.loads(request.content)
@@ -141,6 +148,13 @@ async def test_worker_dispatches_the_pinned_model_after_global_switch(store, set
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         if request.method == "DELETE":
             return httpx.Response(204)
         if request.url.path == "/api/session":
@@ -178,8 +192,12 @@ async def test_worker_dispatches_the_pinned_model_after_global_switch(store, set
 
 @pytest.mark.integration
 @pytest.mark.parametrize("newer_receipt", [False, True])
-async def test_unsupported_version_revokes_old_receipt_but_preserves_new_probe(
-    store, settings, monkeypatch, newer_receipt
+@pytest.mark.parametrize(
+    "failure",
+    ["opencode_version_unsupported", "opencode_budget_not_configured", "model_response_empty"],
+)
+async def test_runtime_failure_revokes_old_receipt_but_preserves_new_probe(
+    store, settings, monkeypatch, newer_receipt, failure
 ):
     import asyncio
     from datetime import UTC, datetime
@@ -216,12 +234,37 @@ async def test_unsupported_version_revokes_old_receipt_but_preserves_new_probe(
 
     async def respond(request):
         calls.append((request.method, request.url.path))
-        assert calls == [("GET", "/api/info")]
-        if newer_receipt:
+        if newer_receipt and (
+            failure == "opencode_version_unsupported"
+            or failure == "opencode_budget_not_configured"
+            and request.url.path == "/api/plugin"
+            or failure == "model_response_empty"
+            and request.url.path.endswith("/generate")
+        ):
             # A delayed rejection from the old server arrives after a fresh successful probe.
             await service.start()
             await asyncio.gather(*service.tasks)
-        return httpx.Response(200, json={"version": "2.2.0"})
+        if request.url.path == "/api/info":
+            return httpx.Response(
+                200,
+                json={"version": "2.2.0" if failure == "opencode_version_unsupported" else "2.1.4"},
+            )
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": []
+                    if failure == "opencode_budget_not_configured"
+                    else [{"id": opencode.BUDGET_PLUGIN, "state": {"status": "active"}}]
+                },
+            )
+        if request.url.path == "/api/session":
+            return httpx.Response(
+                200, json={"data": {"id": "ses_empty", **json.loads(request.content)}}
+            )
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"data": {"text": ""}})
 
     monkeypatch.setattr(
         opencode,
@@ -233,14 +276,29 @@ async def test_unsupported_version_revokes_old_receipt_but_preserves_new_probe(
 
     async def execute(run, store, tsz, get_model, save, **kwargs):
         await get_model().review({})
-        pytest.fail("unsupported OpenCode version must fail before generation")
+        pytest.fail("native runtime failure must not produce a result")
 
     monkeypatch.setattr(worker, "execute", execute)
     async with httpx.AsyncClient() as http:
         assert await worker.run_once(settings, store, TszClient(http))
     failed = await store.get(run.id)
-    assert failed.state == "failed" and failed.error_code == "opencode_version_unsupported"
-    assert calls == [("GET", "/api/info")]
+    assert failed.state == "failed" and failed.error_code == failure
+    assert failed.attempts == 1
+    if failure == "opencode_version_unsupported":
+        assert calls == [("GET", "/api/info")]
+    elif failure == "opencode_budget_not_configured":
+        assert calls == [("GET", "/api/info"), ("GET", "/api/plugin")]
+    else:
+        assert calls == [
+            ("GET", "/api/info"),
+            ("GET", "/api/plugin"),
+            ("POST", "/api/session"),
+            ("POST", "/api/session/ses_empty/generate"),
+            ("DELETE", "/api/session/ses_empty"),
+        ]
+        ledger = await store.model_ledger(1, 10, run.id)
+        assert ledger.items[0].metrics.outcome == "response"
+        assert ledger.items[0].output_tokens is None
     result = (await service.report()).models[0]
     if newer_receipt:
         assert result.status == "available" and result.error is None

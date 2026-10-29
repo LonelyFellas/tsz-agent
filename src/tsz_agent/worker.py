@@ -79,7 +79,9 @@ async def run_once(
                 "model_unavailable",
                 "opencode_unavailable",
                 "opencode_version_unsupported",
+                "opencode_budget_not_configured",
                 "model_output_invalid",
+                "model_response_empty",
             }:
                 await store.invalidate_probe(previous.model, started_at, (run.id, token))
             await store.fail(run.id, token, exc.code, exc.retryable, settings.max_attempts)

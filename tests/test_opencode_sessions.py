@@ -28,13 +28,20 @@ async def test_unverified_server_version_never_creates_an_executable_session(inf
     assert calls == [("GET", "/api/info")]
 
 
-@pytest.mark.parametrize("change", ["permissions", "model", "id"])
+@pytest.mark.parametrize("change", ["permissions", "model", "metadata", "id"])
 async def test_unsafe_session_is_never_used_for_inference(change):
     calls = []
 
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         calls.append((request.method, request.url.path))
         if request.method == "DELETE":
             return httpx.Response(204)
@@ -44,6 +51,8 @@ async def test_unsafe_session_is_never_used_for_inference(change):
             value["permissions"] = [{"action": "*", "resource": "*", "effect": "allow"}]
         elif change == "model":
             value["model"] = {"providerID": "other", "id": "unexpected"}
+        elif change == "metadata":
+            value["metadata"] = {}
         else:
             value["id"] = "ses_../../unrelated"
         return httpx.Response(200, json={"data": value})
@@ -66,6 +75,13 @@ async def test_cancellation_waits_for_owned_session_cleanup(stage):
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         actual_stage = (
             "delete"
             if request.method == "DELETE"
@@ -102,6 +118,13 @@ async def test_concurrent_calls_use_separate_sessions_and_cleanup_on_failure():
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         if request.url.path == "/api/session":
             body = json.loads(request.content)
             assert body["permissions"] == TOOL_PERMISSIONS
@@ -137,6 +160,13 @@ async def test_cleanup_failure_cannot_be_reported_as_success(caplog):
     async def respond(request):
         if request.url.path == "/api/info":
             return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
         if request.url.path == "/api/session":
             body = json.loads(request.content)
             return httpx.Response(200, json={"data": {"id": "ses_fixture", **body}})
@@ -158,3 +188,36 @@ async def test_changed_generation_protocol_invalidates_old_probe_receipts(settin
     monkeypatch.setattr(probes, "SESSION_PROTOCOL", "other-generation-path")
     _, new = await probes.catalog(settings)
     assert old != new
+
+
+@pytest.mark.parametrize("text", ["", " \n\t"])
+async def test_empty_response_is_explicit_not_retried_and_session_is_removed(text):
+    calls = []
+
+    async def respond(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/api/info":
+            return httpx.Response(200, json={"version": "2.1.4"})
+        if request.url.path == "/api/plugin":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                },
+            )
+        if request.url.path == "/api/session":
+            return httpx.Response(
+                200, json={"data": {"id": "ses_empty", **json.loads(request.content)}}
+            )
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"data": {"text": text}})
+
+    async with httpx.AsyncClient(
+        base_url="http://fixture.test", transport=httpx.MockTransport(respond)
+    ) as http:
+        with pytest.raises(TaskError, match="model_response_empty") as error:
+            await generate_text(http, CHOICE, "private input")
+    assert error.value.retryable is False
+    assert calls.count(("POST", "/api/session/ses_empty/generate")) == 1
+    assert calls[-1] == ("DELETE", "/api/session/ses_empty")

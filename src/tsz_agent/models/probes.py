@@ -17,6 +17,7 @@ from pydantic import Field
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.config import Settings
 from tsz_agent.models.opencode import (
+    PROBE_OUTPUT_TOKENS,
     SESSION_PROTOCOL,
     OpenCodeRequestError,
     client,
@@ -147,7 +148,7 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
         async with asyncio.timeout(settings.request_timeout_seconds):
             if model.source == "opencode":
                 async with client(settings) as http:
-                    await generate_text(http, model, PROMPT)
+                    await generate_text(http, model, PROMPT, max_output_tokens=PROBE_OUTPUT_TOKENS)
                 result.http_status = 200
                 result.status = "available"
                 return result
@@ -198,9 +199,13 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
         result.http_status = exc.status_code
         result.error = "request_failed"
     except TaskError as exc:
-        if exc.code == "opencode_not_configured":
+        if exc.code in {"opencode_not_configured", "opencode_budget_not_configured"}:
             result.error = "not_configured"
-        elif exc.code in {"model_output_invalid", "opencode_response_too_large"}:
+        elif exc.code in {
+            "model_output_invalid",
+            "model_response_empty",
+            "opencode_response_too_large",
+        }:
             result.error = "invalid_response"
         elif isinstance(exc.__cause__, httpx.TimeoutException):
             result.error = "timeout"
