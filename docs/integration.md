@@ -136,4 +136,10 @@ API 的非预期异常在 HTTP 中间件返回脱敏 Problem Details，包含 `x
 
 新增 `GET/PUT /v1/model-selection`，沿用内部服务 token。`source` 为 `direct` 或 `opencode`，另传 `provider_id`、`model_id`。配置保存在 Agent 数据库，任务创建时固定模型；切换不影响已创建任务或其重试。需显式迁移至 `0005`，API 与 worker 配置同一 `TSZ_AGENT_OPENCODE_SERVER_URL` / `TSZ_AGENT_OPENCODE_SERVER_PASSWORD`。Key 由 tsz-rust 代理到 OpenCode 保存，Agent 不接收服务商 Key。
 
-OpenCode v2.1.4 无会话生成接口只返回文本，不提供 Token/费用或单次 Token 上限。账本保留未知用量和费用；调度保留预算预留，不把预留视作上游消费硬限制。付费上限须在服务商设置。配套界面、发布与回退说明在 tsz 仓库 `docs/features/opencode-models/README.md`。
+OpenCode 调用先只读检查 `GET /api/info`，仅允许已核对的 v2.1.4，其他版本或无效版本响应在创建会话前直接拒绝。再通过 `POST /api/session` 创建临时会话，固定任务模型、`variant=default` 和内置 `build` agent，同时设置 `permissions=[{action:"*",resource:"*",effect:"ask"}]`，保留原生工具声明且不授予自动执行权限。核对服务端返回的模型及权限后，只调用 `POST /api/session/{id}/generate` 单次生成文本；该版本的此接口只收集文本，不调用工具执行器或进入工具循环。Agent 不调用 prompt、shell、execute 或权限批准接口，也不解释、执行返回的工具参数。不能把“工具声明存在”当成执行授权；文件、终端、网络等工具均不执行。供应商请求由 OpenCode 自身的原生网络客户端直连，Agent 不转发供应商 HTTP/TLS、不伪造工具或客户端身份。
+
+生成与复查分别使用独立会话，成功、错误及取消后均尝试删除；创建中取消会等待创建结束再清理，删除有独立超时，清理失败只记录安全错误码并拒绝将成功结果标记为通过。会话生成不追加对话历史，不复用其他任务的上下文。执行隔离依赖已核对的 v2.1.4 `session.generate` 语义，升级 OpenCode 前必须重跑原生离线验收；不能直接将它替换成会运行工具循环的接口。
+
+模型探测复用同一路径，生成协议版本纳入探测指纹，使旧无会话或 deny-all 探测结果失效；不会自动重新探测或切换模型。`session.generate` 仍只返回文本，不提供 Token/费用或单次 Token 上限。账本保留未知用量和费用；调度保留预算预留，不把预留视作上游消费硬限制。付费上限须在服务商设置。配套界面、发布与回退说明在 tsz 仓库 `docs/features/opencode-models/README.md`。
+
+离线原生验收可显式设置 `OPENCODE_TEST_BINARY=/absolute/path/to/opencode` 运行 `uv run pytest -q tests/test_opencode_runtime.py`，仅接受 v2.1.4。测试使用隔离的 HOME、配置、数据库及本地 HTTPS 假供应商，关闭模型目录联网刷新与自动升级；macOS 另限制进程只能连接 loopback。测试仅在该隔离进程中信任临时测试证书，不关闭 TLS 证书校验。验证 OpenCode 原生客户端直接建立 TLS、会话身份与系统上下文正常、工具声明与普通 Build 会话完全一致；供应商返回已声明的文件或终端工具调用时，执行前探针始终为零、文件无变化、不产生工具循环的后续请求或待批准请求，且会话被删除。它不使用真实账户或模型，不证明免费模型实际可用。

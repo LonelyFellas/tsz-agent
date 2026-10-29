@@ -9,7 +9,7 @@ from test_validators import proposal
 from tsz_agent.app import create_app
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.models.budget import MemoryBudget
-from tsz_agent.models.opencode import OpenCodeModel
+from tsz_agent.models.opencode import TOOL_PERMISSIONS, OpenCodeModel
 from tsz_agent.schemas import CreateRun, ModelSelection, Usage
 from tsz_agent.storage import Store
 
@@ -28,10 +28,21 @@ async def test_gateway_uses_selected_model_scoped_refs_and_unknown_usage(
     calls = []
 
     async def respond(request):
+        if request.url.path == "/api/info":
+            return httpx.Response(200, json={"version": "2.1.4"})
+        if request.method == "DELETE":
+            return httpx.Response(204)
         body = json.loads(request.content)
+        if request.url.path == "/api/session":
+            assert body["model"] == {
+                "providerID": "anthropic",
+                "id": "claude-test",
+                "variant": "default",
+            }
+            assert body["permissions"] == TOOL_PERMISSIONS
+            return httpx.Response(200, json={"data": {"id": "ses_fixture", **body}})
         calls.append(body)
-        assert request.url.path == "/api/experimental/generate"
-        assert body["model"] == {"providerID": "anthropic", "id": "claude-test"}
+        assert request.url.path == "/api/session/ses_fixture/generate"
         output = (
             {"proposal": proposal(["c01", "c02", "c03"]).model_dump(mode="json")}
             if len(calls) == 1
@@ -128,7 +139,15 @@ async def test_worker_dispatches_the_pinned_model_after_global_switch(store, set
     calls, clients = [], []
 
     async def respond(request):
-        calls.append(json.loads(request.content)["model"])
+        if request.url.path == "/api/info":
+            return httpx.Response(200, json={"version": "2.1.4"})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if request.url.path == "/api/session":
+            body = json.loads(request.content)
+            calls.append(body["model"])
+            return httpx.Response(200, json={"data": {"id": "ses_fixture", **body}})
+        assert request.url.path == "/api/session/ses_fixture/generate"
         return httpx.Response(
             200, json={"data": {"text": json.dumps({"verdict": "no_obvious_issue", "issues": []})}}
         )
@@ -148,10 +167,95 @@ async def test_worker_dispatches_the_pinned_model_after_global_switch(store, set
     monkeypatch.setattr(worker, "execute", execute)
     async with httpx.AsyncClient() as http:
         assert await worker.run_once(settings, store, TszClient(http))
-    assert calls == [{"providerID": "paid-provider", "id": "model-a"}]
+    assert calls == [{"providerID": "paid-provider", "id": "model-a", "variant": "default"}]
     assert all(http.is_closed for http in clients)
     result = await store.get(run.id)
     assert result.state == "succeeded" and result.usage.model == choice.usage_model()
     ledger = await store.model_ledger(1, 10, run.id)
     assert ledger.items[0].input_tokens is None
     assert ledger.items[0].output_tokens is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("newer_receipt", [False, True])
+async def test_unsupported_version_revokes_old_receipt_but_preserves_new_probe(
+    store, settings, monkeypatch, newer_receipt
+):
+    import asyncio
+    from datetime import UTC, datetime
+
+    from tsz_agent import worker
+    from tsz_agent.clients.tsz import TszClient
+    from tsz_agent.models import opencode, probes
+
+    settings = settings.model_copy(
+        update={
+            "opencode_server_url": AnyHttpUrl("http://127.0.0.1:4096"),
+            "opencode_server_password": SecretStr("test-opencode-" + "x" * 32),
+        }
+    )
+    choice = ModelSelection(source="opencode", provider_id="fixture", model_id="text")
+    candidate = probes.ModelProbe(**choice.model_dump(), name="Fixture", enabled=True)
+
+    async def catalog(_):
+        # An upgrade need not change the model directory, connection, or saved configuration.
+        return [candidate], "unchanged-context"
+
+    async def check(_, selected):
+        return selected.model_copy(update={"status": "available", "checked_at": datetime.now(UTC)})
+
+    monkeypatch.setattr(probes, "catalog", catalog)
+    monkeypatch.setattr(probes, "probe_one", check)
+    service = probes.ProbeService(settings, store)
+    await service.start()
+    await asyncio.gather(*service.tasks)
+    context = await service.require_available(choice)
+    await store.set_model_selection(choice, probe_context=context)
+    run = await store.create(CreateRun(external_request_id=uuid4()), uuid4())
+    calls = []
+
+    async def respond(request):
+        calls.append((request.method, request.url.path))
+        assert calls == [("GET", "/api/info")]
+        if newer_receipt:
+            # A delayed rejection from the old server arrives after a fresh successful probe.
+            await service.start()
+            await asyncio.gather(*service.tasks)
+        return httpx.Response(200, json={"version": "2.2.0"})
+
+    monkeypatch.setattr(
+        opencode,
+        "client",
+        lambda _: httpx.AsyncClient(
+            base_url="http://opencode.test", transport=httpx.MockTransport(respond)
+        ),
+    )
+
+    async def execute(run, store, tsz, get_model, save, **kwargs):
+        await get_model().review({})
+        pytest.fail("unsupported OpenCode version must fail before generation")
+
+    monkeypatch.setattr(worker, "execute", execute)
+    async with httpx.AsyncClient() as http:
+        assert await worker.run_once(settings, store, TszClient(http))
+    failed = await store.get(run.id)
+    assert failed.state == "failed" and failed.error_code == "opencode_version_unsupported"
+    assert calls == [("GET", "/api/info")]
+    result = (await service.report()).models[0]
+    if newer_receipt:
+        assert result.status == "available" and result.error is None
+        assert await service.require_available(choice) == context
+    else:
+        assert result.status == "unavailable" and result.error == "runtime_failed"
+        with pytest.raises(TaskError, match="model_not_verified"):
+            await service.require_available(choice)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(create_app(settings, store)), base_url="http://agent.test"
+        ) as http:
+            response = await http.put(
+                "/v1/model-selection",
+                headers={"Authorization": "Bearer " + settings.api_token.get_secret_value()},
+                json=choice.model_dump(),
+            )
+        assert response.status_code == 422 and response.json()["code"] == "model_not_verified"
+    assert await store.model_selection() == choice

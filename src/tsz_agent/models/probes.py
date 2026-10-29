@@ -16,7 +16,13 @@ from pydantic import Field
 
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.config import Settings
-from tsz_agent.models.opencode import client, request
+from tsz_agent.models.opencode import (
+    SESSION_PROTOCOL,
+    OpenCodeRequestError,
+    client,
+    generate_text,
+    request,
+)
 from tsz_agent.schemas import ModelSelection, StrictModel
 
 if TYPE_CHECKING:
@@ -122,6 +128,7 @@ async def catalog(settings: Settings) -> tuple[list[ModelProbe], str]:
             "connections": connections,
             "deepseek_key": fingerprint(key.get_secret_value()) if key else None,
             "gateway": str(settings.opencode_server_url),
+            "gateway_protocol": SESSION_PROTOCOL,
             "gateway_key": fingerprint(settings.opencode_server_password.get_secret_value())
             if settings.opencode_server_password
             else None,
@@ -139,12 +146,11 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
     try:
         async with asyncio.timeout(settings.request_timeout_seconds):
             if model.source == "opencode":
-                http = client(settings)
-                path = "/api/experimental/generate"
-                body: dict[str, Any] = {
-                    "prompt": PROMPT,
-                    "model": {"providerID": model.provider_id, "id": model.model_id},
-                }
+                async with client(settings) as http:
+                    await generate_text(http, model, PROMPT)
+                result.http_status = 200
+                result.status = "available"
+                return result
             else:
                 key = settings.deepseek_api_key
                 if key is None or not key.get_secret_value():
@@ -177,11 +183,7 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
                             result.error = "invalid_response"
                             return result
                 value = json.loads(data)
-                content = (
-                    value["data"]["text"]
-                    if model.source == "opencode"
-                    else value["choices"][0]["message"]["content"]
-                )
+                content = value["choices"][0]["message"]["content"]
                 if not isinstance(content, str) or not content.strip():
                     result.error = "invalid_response"
                     return result
@@ -192,8 +194,18 @@ async def probe_one(settings: Settings, model: ModelProbe) -> ModelProbe:
         result.error = "request_failed"
     except (ValueError, KeyError, TypeError, IndexError):
         result.error = "invalid_response"
-    except TaskError:
-        result.error = "not_configured"
+    except OpenCodeRequestError as exc:
+        result.http_status = exc.status_code
+        result.error = "request_failed"
+    except TaskError as exc:
+        if exc.code == "opencode_not_configured":
+            result.error = "not_configured"
+        elif exc.code in {"model_output_invalid", "opencode_response_too_large"}:
+            result.error = "invalid_response"
+        elif isinstance(exc.__cause__, httpx.TimeoutException):
+            result.error = "timeout"
+        else:
+            result.error = "request_failed"
     finally:
         result.checked_at = now()
         result.duration_ms = (perf_counter() - started) * 1000
