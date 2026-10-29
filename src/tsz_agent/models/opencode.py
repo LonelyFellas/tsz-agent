@@ -1,7 +1,9 @@
-"""Stateless OpenCode v2 generations, without giving the model filesystem tools."""
+"""Native OpenCode text-only session generation; tool calls are never executed."""
 
 import asyncio
 import json
+import logging
+import re
 from importlib.resources import files
 from time import perf_counter
 from typing import Any, Literal
@@ -16,6 +18,16 @@ from tsz_agent.models.budget import CallBudget
 from tsz_agent.models.deepseek import DeepSeekModel, GenerationOutput
 from tsz_agent.models.inputs import generation_input, restore_references, review_input
 from tsz_agent.schemas import ModelCallMetrics, ModelSelection, Proposal, SemanticReview, Usage
+
+SESSION_PROTOCOL = "session-generate-no-execution-v2"
+# Ask preserves native tool declarations. This client never approves permissions or runs a tool loop.
+TOOL_PERMISSIONS = [{"action": "*", "resource": "*", "effect": "ask"}]
+
+
+class OpenCodeRequestError(TaskError):
+    def __init__(self, status_code: int):
+        super().__init__("opencode_unavailable", retryable=status_code >= 500 or status_code == 429)
+        self.status_code = status_code
 
 
 def client(settings: Settings) -> httpx.AsyncClient:
@@ -43,22 +55,114 @@ def client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
-async def request(http: httpx.AsyncClient, method: str, path: str, body: Any = None) -> Any:
+async def request(
+    http: httpx.AsyncClient,
+    method: str,
+    path: str,
+    body: Any = None,
+    *,
+    expected_status: int = 200,
+    unwrap: bool = True,
+) -> Any:
     try:
         async with http.stream(method, path, json=body) as response:
-            if response.status_code != 200:
-                raise TaskError(
-                    "opencode_unavailable",
-                    retryable=response.status_code >= 500 or response.status_code == 429,
-                )
+            if response.status_code != expected_status:
+                raise OpenCodeRequestError(response.status_code)
+            if expected_status == 204:
+                return None
             data = bytearray()
             async for chunk in response.aiter_bytes():
                 data.extend(chunk)
                 if len(data) > 2_000_000:
                     raise TaskError("opencode_response_too_large")
-        return json.loads(data)["data"]
+        value = json.loads(data)
+        return value["data"] if unwrap else value
     except (httpx.TransportError, ValueError, KeyError, TypeError) as exc:
         raise TaskError("opencode_unavailable", retryable=True) from exc
+
+
+def session_id(value: Any) -> str | None:
+    identifier = value.get("id") if isinstance(value, dict) else None
+    if isinstance(identifier, str) and re.fullmatch(r"ses_[A-Za-z0-9]+", identifier):
+        return identifier
+    return None
+
+
+async def remove_session(http: httpx.AsyncClient, identifier: str) -> None:
+    try:
+        async with asyncio.timeout(5):
+            try:
+                await request(http, "DELETE", f"/api/session/{identifier}", expected_status=204)
+            except OpenCodeRequestError as exc:
+                if exc.status_code != 404:
+                    raise
+    except (TaskError, TimeoutError) as exc:
+        raise TaskError("opencode_session_cleanup_failed", retryable=True) from exc
+
+
+async def generate_text(http: httpx.AsyncClient, selection: ModelSelection, prompt: str) -> str:
+    # The no-execution guarantee is verified against this native session.generate implementation.
+    info = await request(http, "GET", "/api/info", unwrap=False)
+    if not isinstance(info, dict) or info.get("version") != "2.1.4":
+        raise TaskError("opencode_version_unsupported")
+    model = {"providerID": selection.provider_id, "id": selection.model_id, "variant": "default"}
+
+    async def create() -> Any:
+        async with asyncio.timeout(5):
+            return await request(
+                http,
+                "POST",
+                "/api/session",
+                {
+                    "title": "TSZ generation",
+                    "agent": "build",
+                    "model": model,
+                    "permissions": TOOL_PERMISSIONS,
+                },
+            )
+
+    # Let an in-flight creation finish on cancellation so its server-issued ID can be cleaned up.
+    creation = asyncio.create_task(create())
+    failed = True
+    try:
+        try:
+            value = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            await asyncio.gather(creation, return_exceptions=True)
+            raise
+        identifier = session_id(value)
+        if (
+            identifier is None
+            or value.get("model") != model
+            or value.get("permissions") != TOOL_PERMISSIONS
+        ):
+            raise TaskError("model_output_invalid")
+        # This API prepares normal session context but never executes the returned tool calls.
+        value = await request(
+            http, "POST", f"/api/session/{identifier}/generate", {"prompt": prompt}
+        )
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("text"), str)
+            or not value["text"].strip()
+        ):
+            raise TaskError("model_output_invalid")
+        failed = False
+        return str(value["text"])
+    finally:
+        if creation.done() and not creation.cancelled() and creation.exception() is None:
+            identifier = session_id(creation.result())
+            if identifier is not None:
+                cleanup = asyncio.create_task(remove_session(http, identifier))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
+                except TaskError:
+                    logging.getLogger(__name__).error("opencode_session_cleanup_failed")
+                    if not failed:
+                        raise
 
 
 class OpenCodeModel:
@@ -96,29 +200,16 @@ class OpenCodeModel:
             + DeepSeekModel.prompt(data)
         )
         call_id = uuid4()
-        # v2.1.4 exposes neither usage nor a per-call token cap. Keep the reservation
+        # v2.1.4 session.generate exposes neither usage nor a per-call token cap. Keep the reservation
         # held; never fabricate usage or apply DeepSeek prices to gateway calls.
         await self.budget.reserve(call_id, 3000)
         outcome: Literal["response", "error", "cancelled"] = "error"
         started = perf_counter()
         try:
-            value = await request(
-                self.http,
-                "POST",
-                "/api/experimental/generate",
-                {
-                    "prompt": prompt,
-                    "model": {
-                        "providerID": self.selection.provider_id,
-                        "id": self.selection.model_id,
-                    },
-                },
-            )
-            if not isinstance(value, dict) or not isinstance(value.get("text"), str):
-                raise TaskError("model_output_invalid")
+            value = await generate_text(self.http, self.selection, prompt)
             outcome = "response"
             try:
-                return schema.model_validate_json(value["text"])
+                return schema.model_validate_json(value)
             except ValidationError as exc:
                 raise TaskError("model_output_invalid") from exc
         except asyncio.CancelledError:

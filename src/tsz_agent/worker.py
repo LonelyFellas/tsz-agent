@@ -75,7 +75,12 @@ async def run_once(
                 )
                 await store.complete(run.id, token, result)
         except TaskError as exc:
-            if exc.code in {"model_unavailable", "opencode_unavailable", "model_output_invalid"}:
+            if exc.code in {
+                "model_unavailable",
+                "opencode_unavailable",
+                "opencode_version_unsupported",
+                "model_output_invalid",
+            }:
                 await store.invalidate_probe(previous.model, started_at, (run.id, token))
             await store.fail(run.id, token, exc.code, exc.retryable, settings.max_attempts)
         except TimeoutError:

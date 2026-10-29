@@ -7,7 +7,7 @@ import pytest
 from tsz_agent.app import create_app
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.models import probes
-from tsz_agent.models.opencode import OpenCodeModel
+from tsz_agent.models.opencode import TOOL_PERMISSIONS, OpenCodeModel
 from tsz_agent.models.probes import ModelProbe, ProbeService
 from tsz_agent.schemas import CreateRun, ModelSelection
 from tsz_agent.storage import Store
@@ -66,7 +66,15 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
     async def respond(request):
         import json
 
-        calls.append(json.loads(request.content))
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, body))
+        if request.url.path == "/api/info":
+            return httpx.Response(200, json={"version": "2.1.4"})
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if request.url.path == "/api/session":
+            return httpx.Response(200, json={"data": {"id": "ses_probe", **body}})
+        assert request.url.path == "/api/session/ses_probe/generate"
         if failure == "timeout":
             raise httpx.ReadTimeout("must-not-log raw provider error")
         if failure == 503:
@@ -87,7 +95,19 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
     assert result.error == expected and result.cost is None
     assert result.duration_ms >= 0 and result.checked_at is not None
     assert calls == [
-        {"prompt": probes.PROMPT, "model": {"providerID": "test-provider", "id": "model-1"}}
+        ("GET", "/api/info", None),
+        (
+            "POST",
+            "/api/session",
+            {
+                "title": "TSZ generation",
+                "agent": "build",
+                "model": {"providerID": "test-provider", "id": "model-1", "variant": "default"},
+                "permissions": TOOL_PERMISSIONS,
+            },
+        ),
+        ("POST", "/api/session/ses_probe/generate", {"prompt": probes.PROMPT}),
+        ("DELETE", "/api/session/ses_probe", None),
     ]
     assert "must-not-log" not in result.model_dump_json()
 
