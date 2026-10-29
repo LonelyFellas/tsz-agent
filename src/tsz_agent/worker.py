@@ -12,7 +12,12 @@ from tsz_agent.clients.tsz import TaskError, TszClient
 from tsz_agent.config import Settings
 from tsz_agent.models.budget import StoreBudget
 from tsz_agent.models.deepseek import DeepSeekModel, QuestionModel
-from tsz_agent.models.opencode import OpenCodeModel
+from tsz_agent.models.opencode import (
+    FLINT_JOB_TIMEOUT_SECONDS,
+    FLINT_MODEL,
+    FLINT_TASK_OUTPUT_TOKENS,
+    OpenCodeModel,
+)
 from tsz_agent.schemas import ModelSelection, Usage
 from tsz_agent.storage import Store
 
@@ -31,6 +36,9 @@ async def run_once(
     token = run.lease_token
     assert token is not None
     previous = Usage.model_validate(run.usage)
+    flint = previous.model == FLINT_MODEL
+    output_limit = FLINT_TASK_OUTPUT_TOKENS if flint else settings.output_token_limit
+    job_timeout = FLINT_JOB_TIMEOUT_SECONDS if flint else settings.job_timeout_seconds
     model: QuestionModel | None = None
     lease_lost = False
 
@@ -43,7 +51,7 @@ async def run_once(
                 token,
                 previous,
                 settings.model_request_limit,
-                settings.output_token_limit,
+                output_limit,
             )
             if factory:
                 model = factory(previous)
@@ -69,7 +77,7 @@ async def run_once(
     async def process() -> None:
         started_at = datetime.now(UTC)
         try:
-            async with asyncio.timeout(settings.job_timeout_seconds):
+            async with asyncio.timeout(job_timeout):
                 result = await execute(
                     run, store, tsz, get_model, save, request_limit=settings.model_request_limit
                 )

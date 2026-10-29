@@ -34,7 +34,7 @@ async def test_gateway_uses_selected_model_scoped_refs_and_unknown_usage(
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.method == "DELETE":
@@ -152,7 +152,7 @@ async def test_worker_dispatches_the_pinned_model_after_global_switch(store, set
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.method == "DELETE":

@@ -19,12 +19,21 @@ from tsz_agent.models.deepseek import DeepSeekModel, GenerationOutput
 from tsz_agent.models.inputs import generation_input, restore_references, review_input
 from tsz_agent.schemas import ModelCallMetrics, ModelSelection, Proposal, SemanticReview, Usage
 
-SESSION_PROTOCOL = "session-generate-budget-v3"
-BUDGET_PLUGIN = "tsz.agent.session-budget-v1"
+SESSION_PROTOCOL = "session-generate-budget-v4"
+BUDGET_PLUGIN = "tsz.agent.session-budget-v2"
 OUTPUT_TOKENS = 3000
 PROBE_OUTPUT_TOKENS = 256
+FLINT_MODEL = "opencode/opencode/flint-40b-free"
+FLINT_OUTPUT_TOKENS = 32768
+FLINT_TASK_OUTPUT_TOKENS = 65536
+FLINT_REQUEST_TIMEOUT_SECONDS = 900
+FLINT_JOB_TIMEOUT_SECONDS = 1800
 # Ask preserves native tool declarations. This client never approves permissions or runs a tool loop.
 TOOL_PERMISSIONS = [{"action": "*", "resource": "*", "effect": "ask"}]
+
+
+def output_limit(selection: ModelSelection) -> int:
+    return FLINT_OUTPUT_TOKENS if selection.usage_model() == FLINT_MODEL else OUTPUT_TOKENS
 
 
 class OpenCodeRequestError(TaskError):
@@ -108,7 +117,7 @@ async def generate_text(
     selection: ModelSelection,
     prompt: str,
     *,
-    max_output_tokens: int = OUTPUT_TOKENS,
+    max_output_tokens: int | None = None,
 ) -> str:
     # The no-execution guarantee is verified against this native session.generate implementation.
     info = await request(http, "GET", "/api/info", unwrap=False)
@@ -123,7 +132,10 @@ async def generate_text(
         for p in plugins
     ):
         raise TaskError("opencode_budget_not_configured")
-    if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= OUTPUT_TOKENS:
+    limit = output_limit(selection)
+    if max_output_tokens is None:
+        max_output_tokens = limit
+    if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= limit:
         raise TaskError("model_budget_exceeded")
     metadata = {"tszAgent": {"protocol": SESSION_PROTOCOL, "maxOutputTokens": max_output_tokens}}
     model = {"providerID": selection.provider_id, "id": selection.model_id, "variant": "default"}
@@ -189,6 +201,8 @@ async def generate_text(
 class OpenCodeModel:
     def __init__(self, settings: Settings, selection: ModelSelection, budget: CallBudget):
         self.http = client(settings)
+        if selection.usage_model() == FLINT_MODEL:
+            self.http.timeout = httpx.Timeout(FLINT_REQUEST_TIMEOUT_SECONDS)
         self.selection, self.budget = selection, budget
 
     @staticmethod
@@ -222,7 +236,7 @@ class OpenCodeModel:
         )
         call_id = uuid4()
         # The native plugin applies this allowance; missing usage keeps the reservation held.
-        allowance = await self.budget.reserve(call_id, OUTPUT_TOKENS)
+        allowance = await self.budget.reserve(call_id, output_limit(self.selection))
         outcome: Literal["response", "error", "cancelled"] = "error"
         started = perf_counter()
         try:
