@@ -18,6 +18,8 @@ import pytest
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.models.opencode import (
     BUDGET_PLUGIN,
+    SESSION_PROTOCOL,
+    TOOL_PERMISSIONS,
     OpenCodeRequestError,
     generate_text,
     request,
@@ -30,7 +32,13 @@ from tsz_agent.schemas import ModelSelection
     reason="set OPENCODE_TEST_BINARY for offline native check",
 )
 @pytest.mark.parametrize("wire_field", ["max_tokens", "max_completion_tokens"])
-async def test_native_direct_transport_preserves_tools_without_executing_them(tmp_path, wire_field):
+@pytest.mark.parametrize(
+    "provider_id,model_id,call_cap",
+    [("fixture", "flint-40b-free", 3000), ("opencode", "flint-40b-free", 32768)],
+)
+async def test_native_direct_transport_preserves_tools_without_executing_them(
+    tmp_path, wire_field, provider_id, model_id, call_cap
+):
     binary = os.environ["OPENCODE_TEST_BINARY"]
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, check=True)
     assert version.stdout.strip() == "opencode v2.1.4"
@@ -143,7 +151,20 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     }
                 ],
             }
-            payload = f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+            prefix = ""
+            if body.get(wire_field) == 32768 and 3 <= len(captured) <= 4:
+                reasoning = {
+                    **chunk,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"reasoning_content": "offline reasoning " * 800},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                prefix = f"data: {json.dumps(reasoning)}\n\n"
+            payload = (prefix + f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n").encode()
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("content-length", str(len(payload)))
@@ -165,7 +186,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
     catalog.write_text("{}")
     config = {
         "providers": {
-            "fixture": {
+            provider_id: {
                 "package": "@opencode/ai/providers/openai-compatible",
                 "settings": {
                     "baseURL": f"https://127.0.0.1:{provider.server_port}/v1",
@@ -179,7 +200,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                         "compatibility": {"maxTokensField": wire_field},
                         "capabilities": {"tools": True, "input": ["text"], "output": ["text"]},
                     },
-                    "text": {
+                    model_id: {
                         "name": "Fixture",
                         # A stale provider overlay must not lower or bypass the reserved allowance.
                         "body": {wire_field: 16},
@@ -231,7 +252,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     try:
                         response = await http.get("/api/model")
                         if response.status_code == 200 and any(
-                            m["providerID"] == "fixture" for m in response.json()["data"]
+                            m["providerID"] == provider_id for m in response.json()["data"]
                         ):
                             plugins = (await http.get("/api/plugin")).json()["data"]
                             states = [
@@ -244,7 +265,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                     except httpx.TransportError:
                         pass
                     await asyncio.sleep(0.1)
-            choice = ModelSelection(source="opencode", provider_id="fixture", model_id="text")
+            choice = ModelSelection(source="opencode", provider_id=provider_id, model_id=model_id)
             assert observer_ready.exists(), "execution observer must be installed before generation"
             baseline = await request(
                 http,
@@ -253,7 +274,7 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
                 {
                     "title": "Native declaration baseline",
                     "agent": "build",
-                    "model": {"providerID": "fixture", "id": "text", "variant": "default"},
+                    "model": {"providerID": provider_id, "id": model_id, "variant": "default"},
                 },
             )
             try:
@@ -275,8 +296,8 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
             assert [item["body"].get(wire_field) for item in captured] == [
                 16,
                 256,
-                3000,
-                3000,
+                call_cap,
+                call_cap,
                 500,
             ]
             with pytest.raises(OpenCodeRequestError):
@@ -284,6 +305,35 @@ async def test_native_direct_transport_preserves_tools_without_executing_them(tm
             conflicting = choice.model_copy(update={"model_id": "ambiguous"})
             with pytest.raises(OpenCodeRequestError):
                 await generate_text(http, conflicting, "Must not reach provider")
+            # Bypass the Python cap check to prove the native plugin rejects an excessive
+            # allowance before any provider traffic, including a same-name model elsewhere.
+            forged = await request(
+                http,
+                "POST",
+                "/api/session",
+                {
+                    "title": "Invalid native allowance",
+                    "agent": "build",
+                    "model": {"providerID": provider_id, "id": model_id, "variant": "default"},
+                    "permissions": TOOL_PERMISSIONS,
+                    "metadata": {
+                        "tszAgent": {
+                            "protocol": SESSION_PROTOCOL,
+                            "maxOutputTokens": 32768 if call_cap == 3000 else 32769,
+                        }
+                    },
+                },
+            )
+            try:
+                with pytest.raises(OpenCodeRequestError):
+                    await request(
+                        http,
+                        "POST",
+                        f"/api/session/{forged['id']}/generate",
+                        {"prompt": "Must not reach provider"},
+                    )
+            finally:
+                await request(http, "DELETE", f"/api/session/{forged['id']}", expected_status=204)
             assert len(captured) == 6, (
                 "tool calls must never start a tool loop or follow-up request"
             )

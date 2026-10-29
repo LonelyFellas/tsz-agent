@@ -39,7 +39,7 @@ async def test_unsafe_session_is_never_used_for_inference(change):
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         calls.append((request.method, request.url.path))
@@ -79,7 +79,7 @@ async def test_cancellation_waits_for_owned_session_cleanup(stage):
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         actual_stage = (
@@ -122,7 +122,7 @@ async def test_concurrent_calls_use_separate_sessions_and_cleanup_on_failure():
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.url.path == "/api/session":
@@ -164,7 +164,7 @@ async def test_cleanup_failure_cannot_be_reported_as_success(caplog):
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.url.path == "/api/session":
@@ -202,7 +202,7 @@ async def test_empty_response_is_explicit_not_retried_and_session_is_removed(tex
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.url.path == "/api/session":

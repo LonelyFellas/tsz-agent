@@ -74,7 +74,7 @@ async def test_probe_observes_inference_and_never_stores_raw_output(
             return httpx.Response(
                 200,
                 json={
-                    "data": [{"id": "tsz.agent.session-budget-v1", "state": {"status": "active"}}]
+                    "data": [{"id": "tsz.agent.session-budget-v2", "state": {"status": "active"}}]
                 },
             )
         if request.method == "DELETE":

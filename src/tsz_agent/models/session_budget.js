@@ -1,14 +1,15 @@
 // OpenCode 2.1.4 native plugin. HTTP/TLS remains owned by OpenCode.
 export default {
-  id: "tsz.agent.session-budget-v1",
+  id: "tsz.agent.session-budget-v2",
   async setup(ctx) {
     const owned = async (sessionID) => {
       const session = await ctx.session.get({ sessionID });
       const budget = session.metadata?.tszAgent;
       if (!budget) return;
-      if (budget.protocol !== "session-generate-budget-v3" ||
+      const flint = session.model?.providerID === "opencode" && session.model?.id === "flint-40b-free";
+      if (budget.protocol !== "session-generate-budget-v4" ||
           !Number.isInteger(budget.maxOutputTokens) ||
-          budget.maxOutputTokens < 1 || budget.maxOutputTokens > 3000) {
+          budget.maxOutputTokens < 1 || budget.maxOutputTokens > (flint ? 32768 : 3000)) {
         throw new Error("tsz_invalid_output_budget");
       }
       return { session, budget };
@@ -20,6 +21,10 @@ export default {
     await ctx.session.hook("http.request", async (event) => {
       const state = await owned(event.sessionID);
       if (!state) return;
+      if (state.budget.maxOutputTokens > 3000 &&
+          (event.model.providerID !== "opencode" || event.model.id !== "flint-40b-free")) {
+        throw new Error("tsz_invalid_output_budget");
+      }
       if (event.kind !== "generate" || state.budget.dispatched) {
         throw new Error("tsz_extra_model_request_forbidden");
       }
