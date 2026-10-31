@@ -7,11 +7,12 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
+from tsz_agent import form_candidates, lexicon_assistant
 from tsz_agent.chatgpt_auth import AuthStore
 from tsz_agent.chatgpt_login import (
     ChatGPTAccountInput,
@@ -140,6 +141,45 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/healthz")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/v1/lexicon-assistant/capability", dependencies=[Depends(authorized)])
+    async def assistant_capability() -> dict[str, bool]:
+        key = settings.deepseek_api_key
+        return {"available": key is not None and bool(key.get_secret_value())}
+
+    @app.post(
+        "/v1/lexicon-assistant/form-candidates",
+        response_model=form_candidates.CandidatesOutput,
+        dependencies=[Depends(authorized)],
+    )
+    async def generate_form_candidates(
+        body: form_candidates.CandidatesInput,
+    ) -> form_candidates.CandidatesOutput:
+        try:
+            return await form_candidates.generate(settings, body)
+        except lexicon_assistant.AssistantUnavailable as exc:
+            raise Problem(503, str(exc)) from exc
+
+    @app.post(
+        "/v1/lexicon-assistant/step",
+        response_model=lexicon_assistant.AssistantStepOutput,
+        dependencies=[Depends(authorized)],
+    )
+    async def assistant_step(
+        body: lexicon_assistant.AssistantStepInput,
+    ) -> lexicon_assistant.AssistantStepOutput:
+        try:
+            return await lexicon_assistant.step(settings, body)
+        except lexicon_assistant.AssistantUnavailable as exc:
+            raise Problem(503, str(exc)) from exc
+
+    @app.post("/v1/lexicon-assistant/step/stream", dependencies=[Depends(authorized)])
+    async def assistant_stream(body: lexicon_assistant.AssistantStepInput) -> StreamingResponse:
+        return StreamingResponse(
+            lexicon_assistant.stream_step(settings, body),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/readyz", dependencies=[Depends(authorized)])
     async def ready() -> dict[str, str]:
