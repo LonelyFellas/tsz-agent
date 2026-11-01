@@ -26,6 +26,7 @@ from tsz_agent.config import Settings
 from tsz_agent.models.probes import ModelProbeReport, ProbeService
 from tsz_agent.schemas import (
     CreateRun,
+    ModelCallPurpose,
     ModelCostLedgerPage,
     ModelCostOverview,
     ModelLedgerPage,
@@ -143,7 +144,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return {"status": "ok"}
 
     @app.get("/v1/lexicon-assistant/capability", dependencies=[Depends(authorized)])
-    async def assistant_capability() -> dict[str, bool]:
+    async def assistant_capability(request: Request) -> dict[str, object]:
+        if request.headers.get("x-tsz-assistant-version") == "2":
+            return {
+                "available": bool(settings.deepseek_api_key),
+                "tool_selection": True,
+                "rules_version": lexicon_assistant.RULES_VERSION,
+            }
         key = settings.deepseek_api_key
         return {"available": key is not None and bool(key.get_secret_value())}
 
@@ -156,7 +163,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         body: form_candidates.CandidatesInput,
     ) -> form_candidates.CandidatesOutput:
         try:
-            return await form_candidates.generate(settings, body)
+            return await form_candidates.generate(settings, body, store)
         except lexicon_assistant.AssistantUnavailable as exc:
             raise Problem(503, str(exc)) from exc
 
@@ -169,14 +176,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         body: lexicon_assistant.AssistantStepInput,
     ) -> lexicon_assistant.AssistantStepOutput:
         try:
-            return await lexicon_assistant.step(settings, body)
+            return await lexicon_assistant.step(settings, body, store)
         except lexicon_assistant.AssistantUnavailable as exc:
             raise Problem(503, str(exc)) from exc
 
     @app.post("/v1/lexicon-assistant/step/stream", dependencies=[Depends(authorized)])
     async def assistant_stream(body: lexicon_assistant.AssistantStepInput) -> StreamingResponse:
         return StreamingResponse(
-            lexicon_assistant.stream_step(settings, body),
+            lexicon_assistant.stream_step(settings, body, store),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
@@ -264,31 +271,61 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except TaskError as exc:
             raise Problem(422, exc.code) from exc
 
-    @app.get("/v1/model-calls", response_model=ModelLedgerPage, dependencies=[Depends(authorized)])
+    @app.get(
+        "/v1/model-calls",
+        response_model=ModelLedgerPage,
+        response_model_exclude_none=False,
+        dependencies=[Depends(authorized)],
+    )
     async def get_model_ledger(
+        request: Request,
         page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
         run_id: UUID | None = None,
-    ) -> ModelLedgerPage:
-        return await store.model_ledger(page, page_size, run_id)
+        purpose: ModelCallPurpose | None = None,
+    ) -> JSONResponse:
+        extended = request.headers.get("x-tsz-ledger-version") == "2"
+        result = await store.model_ledger(
+            page, page_size, run_id, service_calls=extended, purpose=purpose if extended else None
+        )
+        payload = result.model_dump(mode="json")
+        if not extended:
+            for item in payload["items"]:
+                item.pop("purpose", None)
+        return JSONResponse(payload)
 
     @app.get(
         "/v1/model-costs", response_model=ModelCostLedgerPage, dependencies=[Depends(authorized)]
     )
     async def get_cost_ledger(
+        request: Request,
         page: Annotated[int, Query(ge=1, le=1_000_000)] = 1,
         page_size: Annotated[int, Query(ge=1, le=100)] = 20,
         run_id: UUID | None = None,
-    ) -> ModelCostLedgerPage:
-        return await store.model_cost_ledger(page, page_size, run_id)
+        purpose: ModelCallPurpose | None = None,
+    ) -> JSONResponse:
+        extended = request.headers.get("x-tsz-ledger-version") == "2"
+        result = await store.model_cost_ledger(
+            page, page_size, run_id, service_calls=extended, purpose=purpose if extended else None
+        )
+        payload = result.model_dump(mode="json")
+        if not extended:
+            for item in payload["ledger"]["items"]:
+                item.pop("purpose", None)
+        return JSONResponse(payload)
 
     @app.get(
         "/v1/model-costs/overview",
         response_model=ModelCostOverview,
         dependencies=[Depends(authorized)],
     )
-    async def get_cost_overview() -> ModelCostOverview:
-        return await store.model_cost_overview()
+    async def get_cost_overview(request: Request) -> JSONResponse:
+        extended = request.headers.get("x-tsz-ledger-version") == "2"
+        result = await store.model_cost_overview(service_calls=extended)
+        payload = result.model_dump(mode="json")
+        if not extended:
+            payload.pop("by_purpose", None)
+        return JSONResponse(payload)
 
     @app.post(
         "/v1/runs", response_model=RunView, status_code=202, dependencies=[Depends(authorized)]

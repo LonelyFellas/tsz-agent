@@ -212,7 +212,7 @@ class Usage(StrictModel):
 
 
 class ModelCallMetrics(StrictModel):
-    phase: Literal["generate", "review"]
+    phase: Literal["generate", "review", "assistant", "form_candidates"]
     outcome: Literal["response", "error", "cancelled"]
     duration_ms: float = Field(ge=0, allow_inf_nan=False)
     cache_hit_tokens: int | None = Field(default=None, ge=0)
@@ -244,9 +244,15 @@ class RunModelMetrics(StrictModel):
     calls: list[ModelCallView]
 
 
+ModelCallPurpose = Literal[
+    "question_generation", "assistant", "form_candidates", "reference_extract"
+]
+
+
 class ModelLedgerItem(ModelCallView):
-    run_id: UUID
-    external_request_id: UUID
+    purpose: ModelCallPurpose | None = None
+    run_id: UUID | None
+    external_request_id: UUID | None
     model: str
     input_tokens: int | None
     output_tokens: int | None
@@ -303,6 +309,11 @@ class ModelCostPeriod(ModelCostTotals):
     end: datetime
 
 
+class ModelPurposeCosts(StrictModel):
+    purpose: ModelCallPurpose
+    total: ModelCostTotals
+
+
 class ModelCostOverview(StrictModel):
     generated_at: datetime
     timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
@@ -313,6 +324,7 @@ class ModelCostOverview(StrictModel):
     today: ModelCostPeriod
     week: ModelCostPeriod
     month: ModelCostPeriod
+    by_purpose: list[ModelPurposeCosts] | None = None
 
 
 class ModelCostLedgerPage(StrictModel):

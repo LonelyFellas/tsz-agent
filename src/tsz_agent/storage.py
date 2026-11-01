@@ -42,6 +42,7 @@ from tsz_agent.schemas import (
     ModelLedgerPage,
     ModelLedgerSummary,
     ModelPricing,
+    ModelPurposeCosts,
     ModelSelection,
     ReviewEvent,
     ReviewExample,
@@ -113,8 +114,10 @@ class FeedbackEvent(Base):
 class ModelCall(Base):
     __tablename__ = "agent_model_calls"
     id: Mapped[UUID] = mapped_column(PGUUID, primary_key=True)
-    run_id: Mapped[UUID] = mapped_column(PGUUID, ForeignKey("agent_runs.id"), index=True)
-    lease_token: Mapped[UUID] = mapped_column(PGUUID)
+    run_id: Mapped[UUID | None] = mapped_column(PGUUID, ForeignKey("agent_runs.id"), index=True)
+    lease_token: Mapped[UUID | None] = mapped_column(PGUUID)
+    purpose: Mapped[str] = mapped_column(String(40), default="question_generation")
+    model: Mapped[str | None] = mapped_column(String(100))
     reserved_output_tokens: Mapped[int] = mapped_column(Integer)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -188,7 +191,7 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0006":
+            if revision != "0007":
                 raise RuntimeError("unsupported_database_revision")
 
     async def model_selection(self) -> ModelSelection:
@@ -390,11 +393,25 @@ class Store:
             calls=calls,
         )
 
-    async def model_ledger(self, page: int, page_size: int, run_id: UUID | None) -> ModelLedgerPage:
+    async def model_ledger(
+        self,
+        page: int,
+        page_size: int,
+        run_id: UUID | None,
+        *,
+        service_calls: bool = False,
+        purpose: str | None = None,
+    ) -> ModelLedgerPage:
         hit = cast(ModelCall.metrics["cache_hit_tokens"].astext, BigInteger)
         miss = cast(ModelCall.metrics["cache_miss_tokens"].astext, BigInteger)
         duration = cast(ModelCall.metrics["duration_ms"].astext, Float)
-        filters = [ModelCall.run_id == run_id] if run_id is not None else []
+        filters = []
+        if run_id is not None:
+            filters.append(ModelCall.run_id == run_id)
+        elif not service_calls:
+            filters.append(ModelCall.run_id.is_not(None))
+        if purpose is not None:
+            filters.append(ModelCall.purpose == purpose)
         async with self.sessions() as session:
             totals = (
                 (
@@ -418,7 +435,7 @@ class Store:
             )
             rows = await session.execute(
                 select(ModelCall, Run)
-                .join(Run, Run.id == ModelCall.run_id)
+                .outerjoin(Run, Run.id == ModelCall.run_id)
                 .where(*filters)
                 .order_by(ModelCall.created_at.desc(), ModelCall.id.desc())
                 .offset((page - 1) * page_size)
@@ -427,9 +444,12 @@ class Store:
             items = [
                 ModelLedgerItem(
                     call_id=call.id,
-                    run_id=run.id,
-                    external_request_id=run.external_request_id,
-                    model=Usage.model_validate(run.usage).model,
+                    purpose=call.purpose if service_calls else None,
+                    run_id=run.id if run else None,
+                    external_request_id=run.external_request_id if run else None,
+                    model=Usage.model_validate(run.usage).model
+                    if run
+                    else (call.model or "unknown"),
                     created_at=call.created_at,
                     input_tokens=call.input_tokens,
                     output_tokens=call.output_tokens,
@@ -450,10 +470,24 @@ class Store:
         )
 
     async def model_cost_ledger(
-        self, page: int, page_size: int, run_id: UUID | None
+        self,
+        page: int,
+        page_size: int,
+        run_id: UUID | None,
+        *,
+        service_calls: bool = False,
+        purpose: str | None = None,
     ) -> ModelCostLedgerPage:
-        ledger = await self.model_ledger(page, page_size, run_id)
-        filters = [ModelCall.run_id == run_id] if run_id is not None else []
+        ledger = await self.model_ledger(
+            page, page_size, run_id, service_calls=service_calls, purpose=purpose
+        )
+        filters = []
+        if run_id is not None:
+            filters.append(ModelCall.run_id == run_id)
+        elif not service_calls:
+            filters.append(ModelCall.run_id.is_not(None))
+        if purpose is not None:
+            filters.append(ModelCall.purpose == purpose)
         async with self.sessions() as session:
             total, priced, amount = (
                 await session.execute(
@@ -481,7 +515,9 @@ class Store:
             ledger=ledger, costs=costs, cost_summary=cost_totals(total, priced, amount)
         )
 
-    async def model_cost_overview(self, as_of: datetime | None = None) -> ModelCostOverview:
+    async def model_cost_overview(
+        self, as_of: datetime | None = None, *, service_calls: bool = False
+    ) -> ModelCostOverview:
         at = as_of or now()
         starts = period_starts(at)
         columns: list[Any] = []
@@ -502,6 +538,25 @@ class Store:
             )
         async with self.sessions() as session:
             row = (await session.execute(select(*columns))).mappings().one()
+            by_purpose = None
+            if service_calls:
+                groups = (
+                    await session.execute(
+                        select(
+                            ModelCall.purpose,
+                            func.count(ModelCall.id),
+                            func.count(ModelCall.estimated_cost_cny),
+                            func.sum(ModelCall.estimated_cost_cny),
+                        )
+                        .where(ModelCall.created_at < at)
+                        .group_by(ModelCall.purpose)
+                        .order_by(ModelCall.purpose)
+                    )
+                ).all()
+                by_purpose = [
+                    ModelPurposeCosts(purpose=purpose, total=cost_totals(total, priced, amount))
+                    for purpose, total, priced, amount in groups
+                ]
         periods = {
             name: ModelCostPeriod(
                 **cost_totals(
@@ -520,6 +575,7 @@ class Store:
             today=periods["today"],
             week=periods["week"],
             month=periods["month"],
+            by_purpose=by_purpose,
         )
 
     async def cancel(self, run_id: UUID) -> RunView | None:
@@ -696,6 +752,42 @@ class Store:
             if call.metrics is not None and call.metrics != payload:
                 raise TaskError("usage_receipt_conflict")
             call.metrics = payload
+            estimate_call(call)
+
+    async def reserve_service_call(self, purpose: str, model: str, reserved_output: int) -> UUID:
+        """Persist a call before dispatch so a crash leaves an unknown, not a missing, spend."""
+        call_id, reserved_at = uuid4(), now()
+        pricing = quote(model, reserved_at)
+        async with self.sessions.begin() as session:
+            session.add(
+                ModelCall(
+                    id=call_id,
+                    purpose=purpose,
+                    model=model,
+                    reserved_output_tokens=reserved_output,
+                    created_at=reserved_at,
+                    pricing=pricing.model_dump(mode="json") if pricing else None,
+                )
+            )
+        return call_id
+
+    async def settle_service_call(
+        self,
+        call_id: UUID,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        metrics: ModelCallMetrics,
+    ) -> None:
+        async with self.sessions.begin() as session:
+            call = await session.get(ModelCall, call_id, with_for_update=True)
+            if call is None or call.run_id is not None or call.metrics is not None:
+                raise TaskError("usage_receipt_invalid")
+            if input_tokens is not None and output_tokens is not None:
+                if min(input_tokens, output_tokens) < 0:
+                    raise TaskError("usage_receipt_invalid")
+                call.input_tokens, call.output_tokens = input_tokens, output_tokens
+                call.recorded_at = now()
+            call.metrics = metrics.model_dump(mode="json")
             estimate_call(call)
 
     async def feedback(self, event: ReviewEvent) -> bool:

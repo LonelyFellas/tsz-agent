@@ -92,6 +92,29 @@
             "minItems": 1,
             "title": "Messages",
             "type": "array"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "search_lexicon",
+                    "find_entries",
+                    "read_lexicon",
+                    "lookup_dictionary",
+                    "read_filling_rules",
+                    "check_draft"
+                  ],
+                  "type": "string"
+                },
+                "maxItems": 6,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools"
           }
         },
         "required": [
@@ -171,9 +194,11 @@
           "name": {
             "enum": [
               "search_lexicon",
+              "find_entries",
               "read_lexicon",
               "lookup_dictionary",
-              "read_filling_rules"
+              "read_filling_rules",
+              "check_draft"
             ],
             "title": "Name",
             "type": "string"
@@ -910,7 +935,9 @@
           "phase": {
             "enum": [
               "generate",
-              "review"
+              "review",
+              "assistant",
+              "form_candidates"
             ],
             "title": "Phase",
             "type": "string"
@@ -984,6 +1011,20 @@
       "ModelCostOverview": {
         "additionalProperties": false,
         "properties": {
+          "by_purpose": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ModelPurposeCosts"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "By Purpose"
+          },
           "currency": {
             "const": "CNY",
             "default": "CNY",
@@ -1151,9 +1192,16 @@
             "type": "string"
           },
           "external_request_id": {
-            "format": "uuid",
-            "title": "External Request Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Request Id"
           },
           "input_tokens": {
             "anyOf": [
@@ -1191,10 +1239,34 @@
             ],
             "title": "Output Tokens"
           },
+          "purpose": {
+            "anyOf": [
+              {
+                "enum": [
+                  "question_generation",
+                  "assistant",
+                  "form_candidates",
+                  "reference_extract"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose"
+          },
           "run_id": {
-            "format": "uuid",
-            "title": "Run Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
           }
         },
         "required": [
@@ -1589,6 +1661,30 @@
           }
         },
         "title": "ModelProbeReport",
+        "type": "object"
+      },
+      "ModelPurposeCosts": {
+        "additionalProperties": false,
+        "properties": {
+          "purpose": {
+            "enum": [
+              "question_generation",
+              "assistant",
+              "form_candidates",
+              "reference_extract"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
+          "total": {
+            "$ref": "#/components/schemas/ModelCostTotals"
+          }
+        },
+        "required": [
+          "purpose",
+          "total"
+        ],
+        "title": "ModelPurposeCosts",
         "type": "object"
       },
       "ModelSelection": {
@@ -4379,9 +4475,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
+                  "additionalProperties": true,
                   "title": "Response Assistant Capability V1 Lexicon Assistant Capability Get",
                   "type": "object"
                 }
@@ -5523,6 +5617,28 @@
               ],
               "title": "Run Id"
             }
+          },
+          {
+            "in": "query",
+            "name": "purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "question_generation",
+                    "assistant",
+                    "form_candidates",
+                    "reference_extract"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Purpose"
+            }
           }
         ],
         "responses": {
@@ -5834,6 +5950,28 @@
                 }
               ],
               "title": "Run Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "question_generation",
+                    "assistant",
+                    "form_candidates",
+                    "reference_extract"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Purpose"
             }
           }
         ],

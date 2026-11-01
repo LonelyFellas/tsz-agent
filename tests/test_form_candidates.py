@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -74,6 +75,7 @@ async def test_sdk_requests_json_and_returns_reviewable_candidates(settings, mon
     assert sent[0]["response_format"] == {"type": "json_object"}
     assert json.loads(sent[0]["messages"][1]["content"])["local_content"] == "尚未填写发音"
     assert "actual_pron" not in result.model_dump_json()
+    assert "lexicon-filling-v3" in sent[0]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -95,6 +97,33 @@ def test_invalid_proposals_do_not_enter_drafts(change):
     with pytest.raises((ValidationError, ValueError)):
         parsed = candidates.CandidatesPayload.model_validate(value)
         candidates.validate_catalog(parsed, request())
+
+
+async def test_cancelled_candidate_records_receipt(settings, monkeypatch):
+    from test_lexicon_assistant import FakeLedger
+
+    sent = asyncio.Event()
+
+    async def respond(req):
+        sent.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        candidates,
+        "AsyncOpenAI",
+        lambda **kwargs: AsyncOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        ),
+    )
+    config = settings.model_copy(update={"deepseek_api_key": SecretStr("synthetic-key")})
+    ledger = FakeLedger()
+    task = asyncio.create_task(candidates.generate(config, request(), ledger))
+    await sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ledger.settled[0][:2] == (None, None)
+    assert ledger.settled[0][2].outcome == "cancelled"
 
 
 async def test_missing_model_does_not_generate_fake_candidates(settings):
