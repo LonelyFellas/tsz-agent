@@ -368,11 +368,13 @@ async def test_service_calls_enter_cost_totals_but_not_run_ledger(store, setting
         headers = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
         legacy = (await client.get("/v1/model-costs", headers=headers)).json()
         assert legacy["ledger"]["items"] == []
+        assert "purpose_filter_supported" not in legacy["ledger"]
         overview = (await client.get("/v1/model-costs/overview", headers=headers)).json()
         assert "by_purpose" not in overview
         headers["x-tsz-ledger-version"] = "2"
         page = (await client.get("/v1/model-costs?purpose=assistant", headers=headers)).json()
         assert page["ledger"]["total"] == 1
+        assert page["ledger"]["purpose_filter_supported"] is True
         assert page["ledger"]["items"][0]["run_id"] is None
         assert page["ledger"]["items"][0]["purpose"] == "assistant"
 
@@ -411,6 +413,32 @@ async def test_stream_close_preserves_already_observed_usage(settings, monkeypat
     events = assistant.stream_step(config, body, ledger)
     assert json.loads(await anext(events))["event"] == "delta"
     await events.aclose()
+    assert ledger.settled[0][:2] == (50, 10)
+    assert ledger.settled[0][2].outcome == "cancelled"
+
+
+async def test_anyio_disconnect_scope_does_not_cancel_known_receipt():
+    from time import perf_counter
+
+    import anyio
+    from openai.types import CompletionUsage
+
+    class SlowLedger(FakeLedger):
+        async def settle_service_call(self, *args):
+            await anyio.sleep(0.02)
+            await super().settle_service_call(*args)
+
+    ledger = SlowLedger()
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await assistant.settle_call(
+            ledger,
+            uuid4(),
+            "assistant",
+            perf_counter(),
+            "cancelled",
+            CompletionUsage(prompt_tokens=50, completion_tokens=10, total_tokens=60),
+        )
     assert ledger.settled[0][:2] == (50, 10)
     assert ledger.settled[0][2].outcome == "cancelled"
 

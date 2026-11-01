@@ -278,6 +278,7 @@ class ModelLedgerPage(StrictModel):
     page: int
     page_size: int
     summary: ModelLedgerSummary
+    purpose_filter_supported: bool | None = None
 
 
 class ModelPricing(StrictModel):

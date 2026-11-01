@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Annotated, Literal, Protocol, cast
 from uuid import UUID
 
+from anyio import CancelScope
 from openai import APIError, AsyncOpenAI
 from openai.types import CompletionUsage
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
@@ -171,11 +172,12 @@ async def settle_call(
                 metrics,
             )
         )
-        try:
-            await asyncio.shield(receipt)
-        except asyncio.CancelledError:
-            await receipt
-            raise
+        with CancelScope(shield=True):
+            try:
+                await asyncio.shield(receipt)
+            except asyncio.CancelledError:
+                await receipt
+                raise
     except Exception:
         # The answer stays deliverable; the reserved row keeps the spend visible as unknown.
         LOG.warning("assistant_ledger_settle_failed phase=%s", phase)

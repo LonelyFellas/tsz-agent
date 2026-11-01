@@ -289,7 +289,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page, page_size, run_id, service_calls=extended, purpose=purpose if extended else None
         )
         payload = result.model_dump(mode="json")
-        if not extended:
+        if extended:
+            payload["purpose_filter_supported"] = True
+        else:
+            payload.pop("purpose_filter_supported", None)
             for item in payload["items"]:
                 item.pop("purpose", None)
         return JSONResponse(payload)
@@ -309,7 +312,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page, page_size, run_id, service_calls=extended, purpose=purpose if extended else None
         )
         payload = result.model_dump(mode="json")
-        if not extended:
+        if extended:
+            payload["ledger"]["purpose_filter_supported"] = True
+        else:
+            payload["ledger"].pop("purpose_filter_supported", None)
             for item in payload["ledger"]["items"]:
                 item.pop("purpose", None)
         return JSONResponse(payload)

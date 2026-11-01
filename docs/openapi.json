@@ -1300,6 +1300,17 @@
             "title": "Page Size",
             "type": "integer"
           },
+          "purpose_filter_supported": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose Filter Supported"
+          },
           "summary": {
             "$ref": "#/components/schemas/ModelLedgerSummary"
           },
