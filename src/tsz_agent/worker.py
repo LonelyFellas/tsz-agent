@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import signal
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -155,6 +156,17 @@ async def main() -> None:
     ):
         raise SystemExit("DeepSeek, OpenCode or ChatGPT must be configured for the worker")
     store = Store(settings.database_url.get_secret_value())
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None
+    stopping = asyncio.Event()
+
+    def request_stop() -> None:
+        if not stopping.is_set():
+            stopping.set()
+            task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, request_stop)
     try:
         await store.ready()
         async with httpx.AsyncClient(
@@ -164,7 +176,7 @@ async def main() -> None:
             follow_redirects=False,
             trust_env=False,
         ) as http:
-            while True:
+            while not stopping.is_set():
                 try:
                     worked = await run_once(settings, store, TszClient(http))
                 except Exception as exc:
@@ -172,9 +184,15 @@ async def main() -> None:
                     worked = False
                 if not worked:
                     await asyncio.sleep(settings.poll_seconds)
+    except asyncio.CancelledError:
+        if not stopping.is_set():
+            raise
     finally:
+        if stopping.is_set():
+            task.uncancel()
         await drain_token_tasks()
         await store.close()
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":

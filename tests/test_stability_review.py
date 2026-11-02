@@ -289,3 +289,89 @@ async def test_heartbeat_stream_obeys_overall_deadline_and_settles(settings, mon
     assert events[-1]["event"] == "failed"
     assert stream.closed and len(ledger.settled) == 1
     assert ledger.settled[0][:2] == (50, 10)
+
+
+async def test_worker_sigterm_waits_for_refresh_in_real_process(tmp_path):
+    import signal
+    import sys
+
+    script = r"""
+import asyncio
+import contextlib
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+import httpx
+from pydantic import SecretStr
+from tsz_agent import worker
+from tsz_agent import chatgpt_auth as auth
+
+root = Path(sys.argv[1])
+store = auth.AuthStore(root)
+entered = asyncio.Event()
+
+async def respond(request):
+    entered.set()
+    while not (root / "release").exists():
+        await asyncio.sleep(0.01)
+    return httpx.Response(200, json={"access_token": "signal-new-access", "refresh_token": "signal-new-refresh", "token_type": "Bearer", "expires_in": 3600})
+
+auth.http_client = lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond))
+worker.Settings = lambda: SimpleNamespace(deepseek_api_key=None, opencode_server_url=None, chatgpt_enabled=True, database_url=SecretStr("synthetic-unused"), tsz_base_url="http://tsz.test", tsz_service_token=SecretStr("synthetic-service-token"))
+
+class RuntimeStore:
+    async def ready(self):
+        pass
+    async def close(self):
+        pass
+
+worker.Store = lambda _: RuntimeStore()
+
+async def run_once(*args):
+    waiter = asyncio.create_task(store.token("oaiapp_signal"))
+    await entered.wait()
+    waiter.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiter
+    print("READY", flush=True)
+    await asyncio.Event().wait()
+
+worker.run_once = run_once
+
+async def run():
+    async with store.locked():
+        data = auth.Credentials(active="oaiapp_signal", accounts={"oaiapp_signal": auth.Account(client_id="oaiapp_signal", subject="signal-fixture", access_token=SecretStr("signal-old-access"), refresh_token=SecretStr("signal-old-refresh"), scopes=auth.SCOPES.split(), expires_at=0)})
+        store.write(data)
+    await worker.main()
+
+try:
+    asyncio.run(run())
+except asyncio.CancelledError:
+    pass
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-c",
+        script,
+        str(tmp_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), 10) == b"READY\n"
+        process.send_signal(signal.SIGTERM)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(process.wait(), 0.1)
+        (tmp_path / "release").touch()
+        _, error = await asyncio.wait_for(process.communicate(), 5)
+        assert process.returncode == 0, error.decode()
+        saved = await auth.AuthStore(tmp_path).accounts()
+        assert (
+            saved.accounts["oaiapp_signal"].refresh_token.get_secret_value() == "signal-new-refresh"
+        )
+    finally:
+        (tmp_path / "release").touch()
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
