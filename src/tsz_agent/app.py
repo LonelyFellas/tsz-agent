@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
 from tsz_agent import form_candidates, lexicon_assistant
-from tsz_agent.chatgpt_auth import AuthStore
+from tsz_agent.chatgpt_auth import AuthStore, drain_token_tasks
 from tsz_agent.chatgpt_login import (
     ChatGPTAccountInput,
     ChatGPTAccounts,
@@ -21,6 +21,7 @@ from tsz_agent.chatgpt_login import (
     ChatGPTLoginService,
     ChatGPTLoginStatus,
     ChatGPTLogout,
+    ChatGPTSetup,
 )
 from tsz_agent.config import Settings
 from tsz_agent.models.probes import ModelProbeReport, ProbeService
@@ -60,6 +61,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         finally:
             await chatgpt.close()
             await probes.close()
+            await drain_token_tasks()
             if owned_store:
                 await store.close()
 
@@ -160,10 +162,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         dependencies=[Depends(authorized)],
     )
     async def generate_form_candidates(
+        request: Request,
         body: form_candidates.CandidatesInput,
     ) -> form_candidates.CandidatesOutput:
         try:
-            return await form_candidates.generate(settings, body, store)
+            return await form_candidates.generate(
+                settings, body, store, request_id=request.state.request_id
+            )
         except lexicon_assistant.AssistantUnavailable as exc:
             raise Problem(503, str(exc)) from exc
 
@@ -196,12 +201,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise Problem(503, "database_unavailable") from exc
         return {"status": "ready"}
 
+    @app.get("/v1/chatgpt/setup", dependencies=[Depends(authorized)])
+    async def chatgpt_setup() -> ChatGPTSetup:
+        return ChatGPTSetup(login_method=settings.chatgpt_login_mode)
+
     @app.get("/v1/chatgpt/accounts", dependencies=[Depends(authorized)])
     async def chatgpt_accounts() -> ChatGPTAccounts:
         return await chatgpt.accounts()
 
     @app.post("/v1/chatgpt/login", dependencies=[Depends(authorized)])
     async def chatgpt_login(body: ChatGPTAccountInput) -> ChatGPTLogin:
+        if settings.chatgpt_login_mode == "ssh":
+            raise Problem(422, "chatgpt_remote_setup_required")
         return await chatgpt.start(body.client_id)
 
     @app.get("/v1/chatgpt/login/{attempt_id}", dependencies=[Depends(authorized)])

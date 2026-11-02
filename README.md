@@ -28,7 +28,7 @@ uv run python -m tsz_agent.worker
 
 ## 本机 ChatGPT 账号登录
 
-支持 DeepSeek、OpenCode 和个人 ChatGPT 账号并存。ChatGPT 通过官方 Sign in with ChatGPT 授权套餐调用，不需要 OpenAI API Key，也不读取 Codex 的登录凭据。配套新版后台提供「系统设置 → AI 账本 → 模型与账号」入口，可登录、查看/切换/退出账号，并探测及选择 ChatGPT 模型；也可使用本机命令行。三端接口、权限与兼容说明见[后台登录接入记录](docs/features/chatgpt-admin/README.md)。
+支持 DeepSeek、OpenCode 和个人 ChatGPT 账号并存。ChatGPT 通过官方 Sign in with ChatGPT 授权套餐调用，不需要 OpenAI API Key，也不读取 Codex 的登录凭据。配套新版后台在「个人设置 → 模型账号」管理账号，在「出题模型」测试和选择模型；也可使用本机命令行。三端接口、权限与兼容说明见[后台登录接入记录](docs/features/chatgpt-admin/README.md)。
 
 ```sh
 uv run python -m tsz_agent.auth login chatgpt
@@ -57,6 +57,40 @@ uv run python -m tsz_agent.auth logout chatgpt --account <client_id>
 ChatGPT 路径使用 `store=false` 的流式 Responses API，不执行工具，只接受最终完成事件中的文本 JSON。已知 token 与缓存回执写入原有账本，套餐费用保持 `null`。当前官方预览不支持 `max_output_tokens`，本地预算只能限制后续调用并在回执超额时拒绝结果，**不能保证供应商单次硬 token 上限**；超时、断流及取消也不代表未消费额度。请在 [ChatGPT Usage](https://chatgpt.com/settings/usage) 设置应用使用限制。
 
 该实现用于符合官方条件的个人本地/自托管使用；商业或远程托管应用须另行确认接入资格。协议依据：[官方授权流程](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[套餐调用限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)。服务器继续使用原已选择的模型；需要关闭 ChatGPT 登录入口时显式设置 `TSZ_AGENT_CHATGPT_ENABLED=false`。本次无需新增数据库迁移。
+
+## 自托管服务器上的 ChatGPT 登录
+
+服务器使用 `TSZ_AGENT_CHATGPT_LOGIN_MODE=ssh`；本机开发继续使用默认 `local`。`deploy/compose.yaml` 默认启用服务器模式，并为 API/worker 挂载同一个私有 `chatgpt-auth` 卷。新安装按文件中的命令使用 `--project-name tsz-agent`；已有部署保留原项目名，登录时用 `--container` 指定实际 API 容器。镜像中目录为 `/var/lib/tsz-agent/chatgpt`，属主为运行用户，目录/文件权限为 `0700`/`0600`。已有绑定目录也可继续使用，但必须让 API、worker 和容器内命令读取相同路径。
+
+在**你的电脑**的本任务 Agent checkout 中，使用已有 SSH 配置运行（SSH 主机名按部署环境替换）：
+
+```bash
+uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test
+```
+
+默认目标容器是 `tsz-agent-api-1`；自定义容器名时加 `--container <名称>`。SSH 用户必须能执行该容器中的命令；程序保留 SSH 主机校验，不关闭验证，也不读取服务器 `.env` 或向本机分发服务 token。
+
+程序先在服务器持久化主机身份及短期交接记录，再在本机启动原有官方 PKCE/OIDC 登录。只把本次选中账号通过 SSH 标准输入交给服务器；服务器保留自身 host ID、其他账号和当前选择。空账号库自动选中首个账号；添加其他账号后，在后台显式切换。指定已有 `client_id` 可重新授权同一账号：
+
+```bash
+uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --account <client_id>
+```
+
+成功后本机暂存凭据自动删除，后续仅服务器刷新。交接结果未知时，私有暂存包保留在本机凭据目录的 `handoffs/<交接ID>/`，目录/文件权限为 `0700`/`0600`；按终端提示恢复或取消，不要手工复制 token：
+
+```bash
+uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --resume <交接ID>
+```
+
+```bash
+uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --cancel-handoff <交接ID>
+```
+
+恢复会先确认服务器回执，已完成的交接只返回结果，不覆盖服务器后来轮转的 token。取消不会撤销一个已经完成迁移的共享会话；已完成时仅确认结果并清除本机副本。退出或其他重授权会阻止迟到交接重新写回旧凭据。待提交交接有效期 10 分钟，超时后需重新授权。
+
+回到「个人设置 → 模型账号」刷新并选择账号，再到「出题模型」测试和保存。服务器模式不再返回无法抵达的本机回调链接。新增 `GET /v1/chatgpt/setup` 只返回 `login_method: local|ssh`，保留旧账号 DTO；配套 Rust 与 Admin 需更新后才展示指导。API/worker 必须同时更新，旧进程写凭据文件会丢弃它不认识的交接字段，导致交接安全失败。无需数据库迁移；本机凭据不经过浏览器、命令参数或日志。
+
+流程依据：[官方自托管 VM 说明](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)。真实账号授权由账号持有人在官方页面完成，合成测试不代表真实账号或套餐已验收。
 
 ## 接口
 

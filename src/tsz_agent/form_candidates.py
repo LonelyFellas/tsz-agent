@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from time import perf_counter
 from typing import Annotated
 
@@ -17,6 +18,8 @@ from tsz_agent.lexicon_assistant import (
     reserve_call,
     settle_call,
 )
+
+LOG = logging.getLogger("tsz_agent.form_candidates")
 
 
 class CandidateVariant(StrictModel):
@@ -85,7 +88,11 @@ def validate_catalog(payload: CandidatesPayload, body: CandidatesInput) -> None:
 
 
 async def generate(
-    settings: Settings, body: CandidatesInput, ledger: ServiceLedger | None = None
+    settings: Settings,
+    body: CandidatesInput,
+    ledger: ServiceLedger | None = None,
+    *,
+    request_id: str | None = None,
 ) -> CandidatesOutput:
     key = settings.deepseek_api_key
     if key is None or not key.get_secret_value():
@@ -126,13 +133,36 @@ notes 只写简短的内容核查提示，使用中文界面术语，不出现 h
         raise
     except APIError as exc:
         await settle_call(ledger, call_id, "form_candidates", started, "error", None)
+        LOG.warning(
+            "form_candidates_rejected reason=provider request_id=%s call_id=%s error_kind=%s",
+            request_id,
+            call_id,
+            type(exc).__name__,
+        )
         raise AssistantUnavailable("model_output_invalid") from exc
     await settle_call(ledger, call_id, "form_candidates", started, "response", response.usage)
+    reason = "response"
+    finish = "unknown"
     try:
         choice = response.choices[0]
+        if choice.finish_reason in {
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+        }:
+            finish = choice.finish_reason
+        if choice.message is None:
+            raise AssistantUnavailable("model_output_invalid")
         if choice.finish_reason != "stop" or not choice.message.content:
+            reason = "incomplete"
             raise AssistantUnavailable("model_output_incomplete")
-        payload = CandidatesPayload.model_validate(json.loads(choice.message.content))
+        reason = "json"
+        value = json.loads(choice.message.content)
+        reason = "schema"
+        payload = CandidatesPayload.model_validate(value)
+        reason = "catalog"
         validate_catalog(payload, body)
         return CandidatesOutput(
             **payload.model_dump(),
@@ -140,5 +170,15 @@ notes 只写简短的内容核查提示，使用中文界面术语，不出现 h
             input_tokens=response.usage.prompt_tokens if response.usage else None,
             output_tokens=response.usage.completion_tokens if response.usage else None,
         )
-    except (ValueError, IndexError) as exc:
+    except (ValueError, IndexError, AttributeError, TypeError, AssistantUnavailable) as exc:
+        LOG.warning(
+            "form_candidates_rejected reason=%s request_id=%s call_id=%s finish_reason=%s error_kind=%s",
+            reason,
+            request_id,
+            call_id,
+            finish,
+            type(exc).__name__,
+        )
+        if isinstance(exc, AssistantUnavailable):
+            raise
         raise AssistantUnavailable("model_output_invalid") from exc

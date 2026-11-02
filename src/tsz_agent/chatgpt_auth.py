@@ -14,9 +14,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import jwt
@@ -32,6 +32,18 @@ PLAN_SCOPE = "chatgpt.tokens.use.direct"
 SCOPES = "openid profile email offline_access resource.invoke " + PLAN_SCOPE
 LOCK_TIMEOUT_SECONDS = 5
 REVOCATION_TIMEOUT_SECONDS = 5
+_TOKEN_TASKS: set[asyncio.Task[SecretStr]] = set()
+
+
+def token_task_done(task: asyncio.Task[SecretStr]) -> None:
+    _TOKEN_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
+async def drain_token_tasks() -> None:
+    while _TOKEN_TASKS:
+        await asyncio.gather(*tuple(_TOKEN_TASKS), return_exceptions=True)
 
 
 def auth_directory() -> Path:
@@ -65,10 +77,21 @@ class Account(BaseModel):
         }
 
 
+class CredentialHandoff(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    expires_at: float
+    client_id: str | None = None
+    expected_session_id: str | None = None
+    status: Literal["pending", "complete", "cancelled"] = "pending"
+    payload_digest: str | None = None
+    imported_session_id: str | None = None
+
+
 class Credentials(BaseModel):
     host_id: str = Field(default_factory=lambda: "urn:uuid:" + str(uuid4()))
     active: str | None = None
     accounts: dict[str, Account] = Field(default_factory=dict)
+    handoff: CredentialHandoff | None = None
 
 
 class AuthStore:
@@ -153,6 +176,13 @@ class AuthStore:
             self.write(data)
 
     async def token(self, client_id: str) -> SecretStr:
+        # A cancelled caller must not discard an already rotating refresh token.
+        task = asyncio.create_task(self._token(client_id))
+        _TOKEN_TASKS.add(task)
+        task.add_done_callback(token_task_done)
+        return await asyncio.shield(task)
+
+    async def _token(self, client_id: str) -> SecretStr:
         # Lock covers read/refresh/atomic replacement, including across API/worker processes.
         async with self.locked():
             data = self.read()
@@ -161,10 +191,15 @@ class AuthStore:
                 raise TaskError("chatgpt_login_required")
             if PLAN_SCOPE not in account.scopes:
                 raise TaskError("chatgpt_plan_not_authorized")
-            if account.expires_at <= time() + 60:
+            current_time = time()
+            if account.expires_at > current_time and (
+                account.refresh_token is None or account.earliest_refresh_at > current_time
+            ):
+                return account.access_token
+            if account.expires_at <= current_time + 60:
                 if account.refresh_token is None:
                     raise TaskError("chatgpt_login_required")
-                if account.earliest_refresh_at > time():
+                if account.earliest_refresh_at > current_time:
                     raise TaskError("chatgpt_refresh_not_ready", retryable=True)
                 async with http_client() as http:
                     response = await oauth_post(
@@ -190,7 +225,10 @@ class AuthStore:
                         clear_tokens(account)
                         self.write(data)
                         raise TaskError("chatgpt_login_required")
-                    raise TaskError("chatgpt_refresh_failed", retryable=response.status_code >= 500)
+                    raise TaskError(
+                        "chatgpt_refresh_failed",
+                        retryable=response.status_code == 429 or response.status_code >= 500,
+                    )
                 update_tokens(account, response.json())
                 self.write(data)
             if PLAN_SCOPE not in account.scopes:
@@ -236,6 +274,9 @@ class AuthStore:
             except (TaskError, KeyError, TypeError, TimeoutError):
                 pass
             clear_tokens(account)
+            account.session_id = str(uuid4())
+            if data.handoff and data.handoff.client_id == client_id:
+                data.handoff.status = "cancelled"
             self.write(data)
             return revoked
 
@@ -347,10 +388,12 @@ async def login(
 ) -> Account:
     async with store.locked():
         data = store.read()
-        store.write(data)  # Persist the host ID before the first authorization attempt.
         previous = data.accounts.get(client_id) if client_id else None
         if client_id and previous is None:
             raise TaskError("chatgpt_account_not_found")
+        if data.handoff and data.handoff.status == "pending":
+            data.handoff.status = "cancelled"
+        store.write(data)  # Persist the host ID before the first authorization attempt.
     state, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(3))
     callback: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
 
@@ -458,6 +501,10 @@ async def login(
             existing = data.accounts.get(issued)
             if existing and existing.subject != account.subject:
                 raise TaskError("chatgpt_account_mismatch")
+            if (previous and (existing is None or existing.session_id != previous.session_id)) or (
+                previous is None and existing is not None
+            ):
+                raise TaskError("chatgpt_login_conflict")
             data.accounts[issued] = account
             data.active = issued
             store.write(data)
