@@ -220,19 +220,30 @@ async def stream_step(
             max_retries=0,
             timeout=min(settings.request_timeout_seconds, 35),
         ) as client:
-            stream = await client.chat.completions.create(
-                model=settings.deepseek_model,
-                messages=model_messages(body),
-                tools=tool_definitions(body.offered_tools()),
-                tool_choice="auto" if body.allow_tools else "none",
-                parallel_tool_calls=False,
-                max_tokens=1200,
-                extra_body={"thinking": {"type": "disabled"}},
-                stream=True,
-                stream_options={"include_usage": True},
-            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + min(settings.request_timeout_seconds, 35)
+            async with asyncio.timeout_at(deadline):
+                stream = await client.chat.completions.create(
+                    model=settings.deepseek_model,
+                    messages=model_messages(body),
+                    tools=tool_definitions(body.offered_tools()),
+                    tool_choice="auto" if body.allow_tools else "none",
+                    parallel_tool_calls=False,
+                    max_tokens=1200,
+                    extra_body={"thinking": {"type": "disabled"}},
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
             async with stream:
-                async for chunk in stream:
+                iterator = stream.__aiter__()
+                while True:
+                    if loop.time() >= deadline:
+                        raise TimeoutError
+                    try:
+                        async with asyncio.timeout_at(deadline):
+                            chunk = await anext(iterator)
+                    except StopAsyncIteration:
+                        break
                     if chunk.usage:
                         usage = chunk.usage
                     if not chunk.choices:
@@ -296,6 +307,7 @@ async def stream_step(
         raise
     except (
         APIError,
+        TimeoutError,
         ValueError,
         IndexError,
         AttributeError,

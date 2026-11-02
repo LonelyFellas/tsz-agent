@@ -41,6 +41,11 @@ def token_task_done(task: asyncio.Task[SecretStr]) -> None:
         task.exception()
 
 
+async def drain_token_tasks() -> None:
+    while _TOKEN_TASKS:
+        await asyncio.gather(*tuple(_TOKEN_TASKS), return_exceptions=True)
+
+
 def auth_directory() -> Path:
     return Path(
         os.environ.get("TSZ_AGENT_CHATGPT_AUTH_DIR", "~/.config/tsz-agent/chatgpt")
@@ -269,6 +274,7 @@ class AuthStore:
             except (TaskError, KeyError, TypeError, TimeoutError):
                 pass
             clear_tokens(account)
+            account.session_id = str(uuid4())
             if data.handoff and data.handoff.client_id == client_id:
                 data.handoff.status = "cancelled"
             self.write(data)
@@ -278,7 +284,6 @@ class AuthStore:
 def clear_tokens(account: Account) -> None:
     account.access_token = account.refresh_token = account.id_token = None
     account.expires_at = 0
-    account.session_id = str(uuid4())
 
 
 def error_code(response: httpx.Response) -> str | None:
@@ -383,12 +388,12 @@ async def login(
 ) -> Account:
     async with store.locked():
         data = store.read()
-        if data.handoff and data.handoff.status == "pending":
-            data.handoff.status = "cancelled"
-        store.write(data)  # Persist the host ID before the first authorization attempt.
         previous = data.accounts.get(client_id) if client_id else None
         if client_id and previous is None:
             raise TaskError("chatgpt_account_not_found")
+        if data.handoff and data.handoff.status == "pending":
+            data.handoff.status = "cancelled"
+        store.write(data)  # Persist the host ID before the first authorization attempt.
     state, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(3))
     callback: asyncio.Future[dict[str, str]] = asyncio.get_running_loop().create_future()
 

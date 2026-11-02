@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 
 from tsz_agent import form_candidates, lexicon_assistant
-from tsz_agent.chatgpt_auth import AuthStore
+from tsz_agent.chatgpt_auth import AuthStore, drain_token_tasks
 from tsz_agent.chatgpt_login import (
     ChatGPTAccountInput,
     ChatGPTAccounts,
@@ -61,6 +61,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         finally:
             await chatgpt.close()
             await probes.close()
+            await drain_token_tasks()
             if owned_store:
                 await store.close()
 

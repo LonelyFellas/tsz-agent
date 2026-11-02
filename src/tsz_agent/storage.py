@@ -268,6 +268,8 @@ class Store:
                 return False
             for index, existing in enumerate(report.models):
                 if existing.usage_model() == model.usage_model():
+                    if model.checked_at is not None:
+                        model.checked_at = await session.scalar(select(func.clock_timestamp()))
                     report.models[index] = model
                     row.probe_report = {**packet, "report": report.model_dump(mode="json")}
                     return True
@@ -603,14 +605,18 @@ class Store:
             await session.execute(
                 text("""UPDATE agent_runs SET state='failed', stage='failed',
                 error_code='lease_expired', lease_token=NULL, lease_until=NULL, updated_at=clock_timestamp()
-                WHERE state='running' AND lease_until<=clock_timestamp() AND attempts>=:limit"""),
+                WHERE id IN (
+                    SELECT id FROM agent_runs
+                    WHERE state='running' AND lease_until<=statement_timestamp() AND attempts>=:limit
+                    FOR UPDATE SKIP LOCKED
+                )"""),
                 {"limit": max_attempts},
             )
             run = await session.scalar(
                 select(Run)
                 .where(
-                    ((Run.state == "queued") & (Run.next_attempt_at <= func.clock_timestamp()))
-                    | ((Run.state == "running") & (Run.lease_until <= func.clock_timestamp()))
+                    ((Run.state == "queued") & (Run.next_attempt_at <= func.statement_timestamp()))
+                    | ((Run.state == "running") & (Run.lease_until <= func.statement_timestamp()))
                 )
                 .where(Run.attempts < max_attempts)
                 .order_by(Run.created_at, Run.id)

@@ -1,9 +1,11 @@
-# Invoke with: docker compose --env-file .env -f deploy/compose.yaml up -d
+# New install: docker compose --project-name tsz-agent --env-file .env -f deploy/compose.yaml up -d
+# Existing installs: retain the deployed project name and pass its API container to login --container.
 # Existing independent Agent database must be migrated before starting these services.
 services:
   api:
     image: ${TSZ_AGENT_IMAGE:?Set an immutable image tag}
     restart: unless-stopped
+    stop_grace_period: 45s
     env_file: ../.env
     environment:
       TSZ_AGENT_CHATGPT_LOGIN_MODE: ${TSZ_AGENT_CHATGPT_LOGIN_MODE:-ssh}
@@ -20,6 +22,7 @@ services:
     image: ${TSZ_AGENT_IMAGE:?Set an immutable image tag}
     command: [python, -m, tsz_agent.worker]
     restart: unless-stopped
+    stop_grace_period: 45s
     env_file: ../.env
     environment:
       TSZ_AGENT_CHATGPT_LOGIN_MODE: ${TSZ_AGENT_CHATGPT_LOGIN_MODE:-ssh}

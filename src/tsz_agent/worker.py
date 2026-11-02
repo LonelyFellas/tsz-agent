@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from tsz_agent.capabilities.vocabulary_mcq.workflow import execute
+from tsz_agent.chatgpt_auth import drain_token_tasks
 from tsz_agent.clients.tsz import TaskError, TszClient
 from tsz_agent.config import Settings
 from tsz_agent.models.budget import StoreBudget
@@ -172,6 +173,7 @@ async def main() -> None:
                 if not worked:
                     await asyncio.sleep(settings.poll_seconds)
     finally:
+        await drain_token_tasks()
         await store.close()
 
 

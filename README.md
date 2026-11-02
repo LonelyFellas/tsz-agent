@@ -60,7 +60,7 @@ ChatGPT 路径使用 `store=false` 的流式 Responses API，不执行工具，�
 
 ## 自托管服务器上的 ChatGPT 登录
 
-服务器使用 `TSZ_AGENT_CHATGPT_LOGIN_MODE=ssh`；本机开发继续使用默认 `local`。`deploy/compose.yaml` 默认启用服务器模式，并为 API/worker 挂载同一个私有 `chatgpt-auth` 卷。镜像中目录为 `/var/lib/tsz-agent/chatgpt`，属主为运行用户，目录/文件权限为 `0700`/`0600`。已有绑定目录也可继续使用，但必须让 API、worker 和容器内命令读取相同路径。
+服务器使用 `TSZ_AGENT_CHATGPT_LOGIN_MODE=ssh`；本机开发继续使用默认 `local`。`deploy/compose.yaml` 默认启用服务器模式，并为 API/worker 挂载同一个私有 `chatgpt-auth` 卷。新安装按文件中的命令使用 `--project-name tsz-agent`；已有部署保留原项目名，登录时用 `--container` 指定实际 API 容器。镜像中目录为 `/var/lib/tsz-agent/chatgpt`，属主为运行用户，目录/文件权限为 `0700`/`0600`。已有绑定目录也可继续使用，但必须让 API、worker 和容器内命令读取相同路径。
 
 在**你的电脑**的本任务 Agent checkout 中，使用已有 SSH 配置运行（SSH 主机名按部署环境替换）：
 

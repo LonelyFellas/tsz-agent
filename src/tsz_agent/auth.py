@@ -8,12 +8,19 @@ import webbrowser
 from pathlib import Path
 from uuid import UUID
 
-from tsz_agent.chatgpt_auth import AuthStore, login
+from tsz_agent.chatgpt_auth import AuthStore, drain_token_tasks, login
 from tsz_agent.clients.tsz import TaskError
 from tsz_agent.models.chatgpt import catalog
 
 
 async def run(args: argparse.Namespace) -> None:
+    try:
+        await run_command(args)
+    finally:
+        await drain_token_tasks()
+
+
+async def run_command(args: argparse.Namespace) -> None:
     store = AuthStore(args.auth_dir)
     if args.command.startswith("handoff-"):
         from tsz_agent import chatgpt_handoff as handoff
