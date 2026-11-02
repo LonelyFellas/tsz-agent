@@ -12,8 +12,11 @@ WORKDIR /app
 COPY --from=build /app /app
 COPY alembic.ini ./
 COPY migrations ./migrations
-RUN useradd --uid 10001 --create-home agent
+RUN useradd --uid 10001 --create-home agent \
+    && install -d -m 0700 -o agent -g agent /var/lib/tsz-agent/chatgpt
 USER agent
-ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    TSZ_AGENT_CHATGPT_AUTH_DIR=/var/lib/tsz-agent/chatgpt \
+    TSZ_AGENT_CHATGPT_LOGIN_MODE=ssh
 EXPOSE 8390
 CMD ["uvicorn", "tsz_agent.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8390"]

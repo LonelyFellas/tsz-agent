@@ -26,6 +26,10 @@ class ChatGPTAccountInput(StrictModel):
     )
 
 
+class ChatGPTSetup(StrictModel):
+    login_method: Literal["local", "ssh"]
+
+
 class ChatGPTLogin(StrictModel):
     attempt_id: UUID
     authorization_url: str

@@ -1,6 +1,20 @@
 # 管理后台 ChatGPT 登录
 
-目标：在超管的「系统设置 → AI 账本 → 模型与账号」中使用本机 ChatGPT 登录、查看账号/套餐授权状态、切换或退出账号，并通过既有探测流程选择出题模型。DeepSeek/OpenCode 保留原路径。
+目标：超管在「个人设置 → 模型账号」登录和管理 ChatGPT 账号，在「出题模型」测试并选择模型。DeepSeek/OpenCode 保留原路径。
+
+## 2026-11-02：自托管登录补全
+
+服务器登录改用本机官方 OAuth + SSH 账号交接；详细命令和恢复步骤见[运行说明](../../../README.md#自托管服务器上的-chatgpt-登录)。Agent 复用 `codex/agent-stability-test-20261102`，Rust/Admin 分别在各自 `codex/chatgpt-selfhosted-login` 工作区实施。没有新增数据库迁移，尚未部署。
+
+- 新增独立 `GET /v1/chatgpt/setup` 与超管代理 `GET /api/v1/admin/chatgpt/setup`，只返回 `login_method: local|ssh`，旧账号 DTO 不增加字段。新 Rust 遇旧 Agent 的 setup 404、新前端遇旧 Rust 的 setup 404 时维持旧本机模式；其他错误不回退。服务器模式拒绝原有 loopback 登录发起。
+- 选定账号通过 SSH stdin 交接，保留 SSH 主机校验。VM 保留 host ID、其他账号和原 active；空账号库选中首个账号。本地暂存成功后清除，未知结果可恢复；同交接重放不覆盖 VM 后续轮转。注销或重授权使迟到交接停止生效。
+- 本机和服务器均复用原有 PKCE、OIDC 验证、权限隔离和刷新串行锁。只迁移本应用凭据，不读取 Codex 凭据，不把 token 交给浏览器，不自动更换当前出题模型。
+- Compose 为 API/worker 挂载相同私有卷，Docker 用户拥有 `0700` 目录和 `0600` 文件。升级须先更新两个 Agent 进程，再更新 Rust 和 Admin；旧 worker 写凭据时会丢弃未知交接字段，不能在交接期间混用。旧 consumer 严格 DTO 仍保持兼容。
+- 浏览器还复现了账号/模型兄弟组件 key 相同导致账号区随刷新累积的问题，现已区分 key 并补回归。
+
+本轮验证：Agent 286 通过、4 项可选 OpenCode 实机跳过；api-client 671 通过；后台登录/模型连接相关 13 项通过，类型和管理端构建通过；Rust 超管代理集成、fmt、全目标/全 feature Clippy 通过。真实本地 Admin → Rust → Agent → 存储链路验证了账号回读、显式探测/模型选择和整页重载持久化；375px 页面无横向溢出。OpenAI OAuth/模型响应及 SSH 传输使用合成替身，真实回调 HTTP、PKCE/OIDC 校验、服务器 CLI stdin 和文件写入均实际执行，不代表真实账号授权或实际 SSH 网络迁移成功。
+
+新镜像构建因 Docker Hub/GHCR 元数据超时未完成；补充使用已有不可变 Linux 运行时挂载当前源码，在禁网、只读根目录下验证跨容器交接持久化、UID 10001、目录/文件权限与 host ID 保留。该证据不能替代新 Dockerfile 完整构建。隔离回执见容器工作区 `.task-artifacts/chatgpt-selfhosted-20261102/`，最终清理状态及完整记录见 `output/agent-stability-2026-11-02.md`。
 
 ## 依赖与范围
 

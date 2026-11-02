@@ -5,6 +5,10 @@ services:
     image: ${TSZ_AGENT_IMAGE:?Set an immutable image tag}
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      TSZ_AGENT_CHATGPT_LOGIN_MODE: ${TSZ_AGENT_CHATGPT_LOGIN_MODE:-ssh}
+      TSZ_AGENT_CHATGPT_AUTH_DIR: /var/lib/tsz-agent/chatgpt
+    volumes: [chatgpt-auth:/var/lib/tsz-agent/chatgpt]
     ports:
       - "127.0.0.1:8390:8390"
     read_only: true
@@ -17,8 +21,14 @@ services:
     command: [python, -m, tsz_agent.worker]
     restart: unless-stopped
     env_file: ../.env
+    environment:
+      TSZ_AGENT_CHATGPT_LOGIN_MODE: ${TSZ_AGENT_CHATGPT_LOGIN_MODE:-ssh}
+      TSZ_AGENT_CHATGPT_AUTH_DIR: /var/lib/tsz-agent/chatgpt
+    volumes: [chatgpt-auth:/var/lib/tsz-agent/chatgpt]
     read_only: true
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     mem_limit: 512m
+volumes:
+  chatgpt-auth:

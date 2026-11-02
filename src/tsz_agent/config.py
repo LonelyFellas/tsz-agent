@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     opencode_server_url: AnyHttpUrl | None = None
     opencode_server_password: SecretStr | None = None
     chatgpt_enabled: bool = True
+    chatgpt_login_mode: Literal["local", "ssh"] = "local"
     chatgpt_auth_dir: Path = Field(
         default_factory=lambda: Path("~/.config/tsz-agent/chatgpt").expanduser()
     )

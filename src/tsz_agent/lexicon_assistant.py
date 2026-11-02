@@ -239,6 +239,8 @@ async def stream_step(
                         continue
                     choice = chunk.choices[0]
                     finish = choice.finish_reason or finish
+                    if choice.delta is None:
+                        raise AssistantUnavailable("model_output_invalid")
                     if choice.delta.content:
                         text += choice.delta.content
                         pending += choice.delta.content
@@ -292,7 +294,15 @@ async def stream_step(
     except (asyncio.CancelledError, GeneratorExit):
         outcome = "cancelled"
         raise
-    except (APIError, ValueError, IndexError, AssistantUnavailable):
+    except (
+        APIError,
+        ValueError,
+        IndexError,
+        AttributeError,
+        TypeError,
+        AssistantUnavailable,
+    ) as exc:
+        LOG.warning("assistant_stream_failed call_id=%s error_kind=%s", call_id, type(exc).__name__)
         yield json.dumps({"event": "failed"}) + "\n"
     finally:
         if not settled:

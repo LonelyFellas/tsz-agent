@@ -90,13 +90,19 @@ class Run(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     lease_token: Mapped[UUID | None] = mapped_column(PGUUID)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.clock_timestamp()
+    )
     checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     usage: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     error_code: Mapped[str | None] = mapped_column(String(60))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.clock_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.clock_timestamp()
+    )
     __table_args__ = (Index("agent_runs_due", "state", "next_attempt_at"),)
 
 
@@ -596,15 +602,15 @@ class Store:
             # Finish exhausted crashed jobs before searching for runnable work.
             await session.execute(
                 text("""UPDATE agent_runs SET state='failed', stage='failed',
-                error_code='lease_expired', lease_token=NULL, lease_until=NULL, updated_at=now()
-                WHERE state='running' AND lease_until<=now() AND attempts>=:limit"""),
+                error_code='lease_expired', lease_token=NULL, lease_until=NULL, updated_at=clock_timestamp()
+                WHERE state='running' AND lease_until<=clock_timestamp() AND attempts>=:limit"""),
                 {"limit": max_attempts},
             )
             run = await session.scalar(
                 select(Run)
                 .where(
-                    ((Run.state == "queued") & (Run.next_attempt_at <= func.now()))
-                    | ((Run.state == "running") & (Run.lease_until <= func.now()))
+                    ((Run.state == "queued") & (Run.next_attempt_at <= func.clock_timestamp()))
+                    | ((Run.state == "running") & (Run.lease_until <= func.clock_timestamp()))
                 )
                 .where(Run.attempts < max_attempts)
                 .order_by(Run.created_at, Run.id)
@@ -613,31 +619,35 @@ class Store:
             )
             if run is None:
                 return None
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
             run.state = "running"
             run.lease_token = uuid4()
-            run.lease_until = now() + timedelta(seconds=lease_seconds)
+            run.lease_until = at + timedelta(seconds=lease_seconds)
             run.attempts += 1
             run.error_code = None
-            run.updated_at = now()
+            run.updated_at = at
             return run
 
     async def renew(self, run_id: UUID, token: UUID, lease_seconds: int) -> bool:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
-            if not self.owned(run, token):
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
+            if not self.owned(run, token, at):
                 return False
             assert run is not None
-            run.lease_until = now() + timedelta(seconds=lease_seconds)
+            run.lease_until = at + timedelta(seconds=lease_seconds)
             return True
 
     @staticmethod
-    def owned(run: Run | None, token: UUID) -> bool:
+    def owned(run: Run | None, token: UUID, at: datetime) -> bool:
         return bool(
             run
             and run.state == "running"
             and run.lease_token == token
             and run.lease_until
-            and run.lease_until > now()
+            and run.lease_until > at
         )
 
     async def checkpoint(
@@ -645,22 +655,26 @@ class Store:
     ) -> bool:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
-            if not self.owned(run, token):
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
+            if not self.owned(run, token, at):
                 return False
             assert run is not None
             run.stage, run.checkpoint = stage, checkpoint
-            run.updated_at = now()
+            run.updated_at = at
             return True
 
     async def complete(self, run_id: UUID, token: UUID, result: RunResult) -> bool:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
-            if not self.owned(run, token):
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
+            if not self.owned(run, token, at):
                 return False
             assert run is not None
             run.state, run.stage = "succeeded", "completed"
             run.result = result.model_dump(mode="json")
-            run.lease_token, run.lease_until, run.updated_at = None, None, now()
+            run.lease_token, run.lease_until, run.updated_at = None, None, at
             return True
 
     async def fail(
@@ -668,13 +682,15 @@ class Store:
     ) -> None:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
-            if not self.owned(run, token):
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
+            if not self.owned(run, token, at):
                 return
             assert run is not None
             run.state = "queued" if retryable and run.attempts < max_attempts else "failed"
             run.error_code = code
-            run.next_attempt_at = now() + timedelta(seconds=10 * 2 ** (run.attempts - 1))
-            run.lease_token, run.lease_until, run.updated_at = None, None, now()
+            run.next_attempt_at = at + timedelta(seconds=10 * 2 ** (run.attempts - 1))
+            run.lease_token, run.lease_until, run.updated_at = None, None, at
 
     async def reserve_model_call(
         self,
@@ -687,7 +703,9 @@ class Store:
     ) -> tuple[int, Usage]:
         async with self.sessions.begin() as session:
             run = await session.get(Run, run_id, with_for_update=True)
-            if not self.owned(run, token):
+            at = await session.scalar(select(func.clock_timestamp()))
+            assert at is not None
+            if not self.owned(run, token, at):
                 raise TaskError("lease_lost")
             assert run is not None
             usage = Usage.model_validate(run.usage)
@@ -700,7 +718,7 @@ class Store:
             if usage.requests >= request_limit or remaining <= 0 or requested_output <= 0:
                 raise TaskError("model_budget_exceeded")
             allowance = min(requested_output, remaining)
-            reserved_at = now()
+            reserved_at = at
             pricing = quote(usage.model, reserved_at)
             session.add(
                 ModelCall(
@@ -713,7 +731,7 @@ class Store:
                 )
             )
             usage.requests += 1
-            run.usage, run.updated_at = usage.model_dump(mode="json"), now()
+            run.usage, run.updated_at = usage.model_dump(mode="json"), at
             return allowance, usage
 
     async def record_model_usage(
