@@ -15,5 +15,6 @@
 从 origin/main 创建 codex/ 任务分支及独立 worktree，复用已有本任务 checkout。首次空仓初始化没有 main 时可直接使用任务分支。
 未经授权不提交、推送、合并或部署。不绕过已有 hooks。
 
-定向验证后最终执行 `uv run ruff check`、`uv run ruff format --check`、`uv run mypy`、`uv run pytest`、契约导出漂移检查及构建。
-集成测试仅连接独立本地 `tsz_agent_test` 数据库。真实 tsz-rust 联调、真实付费模型调用与模拟测试分别报告；缺少环境不得将 mock 通过称为真实联调成功。
+验证流程与隔离约束维护在 [test](.agents/skills/test/SKILL.md)，本地 API/worker、数据库和模型来源维护在 [dev-env](.agents/skills/dev-env/SKILL.md)，交付按 [ship](.agents/skills/ship/SKILL.md)。项目规则已覆盖的通用编码原则不重复加载。
+
+`.agents/skills` 是流程维护位置，`.claude/skills` 仅作兼容入口。真实 tsz-rust 联调、真实模型额度调用与模拟测试分别报告；缺环境和跳过不算通过，普通本地测试不自动授权真实模型调用。

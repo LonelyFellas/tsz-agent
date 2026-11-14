@@ -76,7 +76,8 @@ def test_beijing_calendar_boundaries():
 @pytest.mark.integration
 async def test_frozen_prices_and_out_of_order_receipts_survive_cancel(store, monkeypatch):
     at = datetime(2026, 10, 28, 10, tzinfo=BJ)
-    monkeypatch.setattr("tsz_agent.storage.now", lambda: at)
+    # Reservations use the database clock; fix the quote without changing lease time.
+    monkeypatch.setattr("tsz_agent.storage.quote", lambda model, _: quote(model, at))
     run = await store.create(CreateRun(external_request_id=uuid4()), uuid4())
     lease = await store.claim(60, 3)
     call_id = uuid4()
