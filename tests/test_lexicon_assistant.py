@@ -96,7 +96,7 @@ async def test_tool_round_trip_uses_real_sdk_and_bounds_output(settings, monkeyp
                 ],
             }
             if len(requests) == 1
-            else {"role": "assistant", "content": "根据内置词典，建议区分两个义项。"}
+            else {"role": "assistant", "content": "根据内置词典，建议区分两个词义。"}
         )
         return httpx.Response(
             200,
@@ -138,7 +138,7 @@ async def test_tool_round_trip_uses_real_sdk_and_bounds_output(settings, monkeyp
     )
     body.allow_tools = False
     second = await assistant.step(config, body)
-    assert "两个义项" in second.content
+    assert "两个词义" in second.content
     assert requests[1]["messages"][-1] == {
         "role": "tool",
         "content": "银行；河岸",

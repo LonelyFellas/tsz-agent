@@ -699,6 +699,75 @@
         "title": "CreateRun",
         "type": "object"
       },
+      "Definition": {
+        "additionalProperties": false,
+        "properties": {
+          "english": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "English",
+            "type": "string"
+          },
+          "explanation": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sense",
+          "english",
+          "explanation"
+        ],
+        "title": "Definition",
+        "type": "object"
+      },
+      "Dialect": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Evidence",
+            "type": "string"
+          },
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          },
+          "source_locator": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Source Locator",
+            "type": "string"
+          },
+          "usage": {
+            "enum": [
+              "en-GB",
+              "en-US"
+            ],
+            "title": "Usage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sense",
+          "usage",
+          "source_locator",
+          "evidence"
+        ],
+        "title": "Dialect",
+        "type": "object"
+      },
       "DistractorChoice": {
         "additionalProperties": false,
         "properties": {
@@ -794,6 +863,65 @@
         "title": "DraftProposal",
         "type": "object"
       },
+      "Equivalent": {
+        "additionalProperties": false,
+        "properties": {
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          },
+          "word": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Word",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sense",
+          "word"
+        ],
+        "title": "Equivalent",
+        "type": "object"
+      },
+      "Example": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "enum": [
+              "A1",
+              "A2",
+              "B1",
+              "B2",
+              "C1",
+              "C2"
+            ],
+            "title": "Level",
+            "type": "string"
+          },
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          },
+          "text": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sense",
+          "text",
+          "level"
+        ],
+        "title": "Example",
+        "type": "object"
+      },
       "GeneratedQuestion": {
         "additionalProperties": false,
         "properties": {
@@ -869,6 +997,120 @@
           "semantic_review"
         ],
         "title": "GeneratedQuestion",
+        "type": "object"
+      },
+      "Grammar": {
+        "additionalProperties": false,
+        "properties": {
+          "pattern": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Pattern",
+            "type": "string"
+          },
+          "pos": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Pos",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pos",
+          "pattern"
+        ],
+        "title": "Grammar",
+        "type": "object"
+      },
+      "Group": {
+        "additionalProperties": false,
+        "properties": {
+          "name_en": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name En",
+            "type": "string"
+          },
+          "name_zh": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name Zh",
+            "type": "string"
+          },
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sense",
+          "name_en",
+          "name_zh"
+        ],
+        "title": "Group",
+        "type": "object"
+      },
+      "Input": {
+        "additionalProperties": false,
+        "properties": {
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/Material"
+            },
+            "maxItems": 12,
+            "title": "Materials",
+            "type": "array"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "scope",
+          "materials"
+        ],
+        "title": "Input",
+        "type": "object"
+      },
+      "Material": {
+        "additionalProperties": false,
+        "properties": {
+          "excerpt": {
+            "maxLength": 1400,
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "locator": {
+            "maxLength": 1000,
+            "title": "Locator",
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "found",
+              "no_match",
+              "unavailable",
+              "not_configured"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "locator",
+          "excerpt",
+          "status"
+        ],
+        "title": "Material",
         "type": "object"
       },
       "ModelCallCost": {
@@ -1748,6 +1990,83 @@
         "title": "ModelSelection",
         "type": "object"
       },
+      "Proposals": {
+        "additionalProperties": false,
+        "properties": {
+          "definitions": {
+            "items": {
+              "$ref": "#/components/schemas/Definition"
+            },
+            "title": "Definitions",
+            "type": "array"
+          },
+          "dialect": {
+            "items": {
+              "$ref": "#/components/schemas/Dialect"
+            },
+            "title": "Dialect",
+            "type": "array"
+          },
+          "equivalents": {
+            "items": {
+              "$ref": "#/components/schemas/Equivalent"
+            },
+            "title": "Equivalents",
+            "type": "array"
+          },
+          "examples": {
+            "items": {
+              "$ref": "#/components/schemas/Example"
+            },
+            "title": "Examples",
+            "type": "array"
+          },
+          "forms": {
+            "items": {
+              "$ref": "#/components/schemas/CandidatePos"
+            },
+            "title": "Forms",
+            "type": "array"
+          },
+          "grammar": {
+            "items": {
+              "$ref": "#/components/schemas/Grammar"
+            },
+            "title": "Grammar",
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "title": "Groups",
+            "type": "array"
+          },
+          "relations": {
+            "items": {
+              "$ref": "#/components/schemas/Relation"
+            },
+            "title": "Relations",
+            "type": "array"
+          },
+          "senses": {
+            "items": {
+              "$ref": "#/components/schemas/Sense"
+            },
+            "title": "Senses",
+            "type": "array"
+          },
+          "translations": {
+            "items": {
+              "$ref": "#/components/schemas/Translation"
+            },
+            "title": "Translations",
+            "type": "array"
+          }
+        },
+        "title": "Proposals",
+        "type": "object"
+      },
       "QuestionOption": {
         "additionalProperties": false,
         "properties": {
@@ -1770,6 +2089,54 @@
           "candidate"
         ],
         "title": "QuestionOption",
+        "type": "object"
+      },
+      "Relation": {
+        "additionalProperties": false,
+        "properties": {
+          "gloss": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Gloss",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "synonym",
+              "antonym",
+              "derivative"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "score": {
+            "maximum": 99.9,
+            "minimum": 0.0,
+            "multipleOf": 0.1,
+            "title": "Score",
+            "type": "number"
+          },
+          "sense": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Sense",
+            "type": "integer"
+          },
+          "word": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Word",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sense",
+          "kind",
+          "word",
+          "gloss",
+          "score"
+        ],
+        "title": "Relation",
         "type": "object"
       },
       "ReviewEvent": {
@@ -2162,6 +2529,142 @@
         "title": "RunView",
         "type": "object"
       },
+      "Scope": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "format": "uuid",
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "base_revision": {
+            "minimum": 1.0,
+            "title": "Base Revision",
+            "type": "integer"
+          },
+          "catalog": {
+            "additionalProperties": {
+              "items": {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "maxProperties": 60,
+            "minProperties": 1,
+            "propertyNames": {
+              "maxLength": 100,
+              "minLength": 1
+            },
+            "title": "Catalog",
+            "type": "object"
+          },
+          "entry_id": {
+            "format": "uuid",
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "examples": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Examples",
+            "type": "array"
+          },
+          "existing_pos": {
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 60,
+            "title": "Existing Pos",
+            "type": "array"
+          },
+          "headword": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Headword",
+            "type": "string"
+          },
+          "medium": {
+            "enum": [
+              "zh-Hans",
+              "zh-Hant"
+            ],
+            "title": "Medium",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "sections": {
+            "items": {
+              "enum": [
+                "forms",
+                "senses",
+                "groups",
+                "grammar",
+                "definitions",
+                "equivalents",
+                "relations",
+                "dialect",
+                "examples",
+                "translations"
+              ],
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Sections",
+            "type": "array"
+          },
+          "senses": {
+            "items": {
+              "$ref": "#/components/schemas/SenseContext"
+            },
+            "maxItems": 80,
+            "title": "Senses",
+            "type": "array"
+          },
+          "snapshot_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "target": {
+            "enum": [
+              "en-GB",
+              "en-US"
+            ],
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "entry_id",
+          "actor_id",
+          "base_revision",
+          "headword",
+          "medium",
+          "target",
+          "sections",
+          "senses",
+          "existing_pos",
+          "examples",
+          "catalog",
+          "snapshot_id"
+        ],
+        "title": "Scope",
+        "type": "object"
+      },
       "SemanticReview": {
         "additionalProperties": false,
         "properties": {
@@ -2189,6 +2692,64 @@
           "issues"
         ],
         "title": "SemanticReview",
+        "type": "object"
+      },
+      "Sense": {
+        "additionalProperties": false,
+        "properties": {
+          "gloss": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Gloss",
+            "type": "string"
+          },
+          "level": {
+            "enum": [
+              "A1",
+              "A2",
+              "B1",
+              "B2",
+              "C1",
+              "C2"
+            ],
+            "title": "Level",
+            "type": "string"
+          },
+          "pos": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Pos",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pos",
+          "gloss",
+          "level"
+        ],
+        "title": "Sense",
+        "type": "object"
+      },
+      "SenseContext": {
+        "additionalProperties": false,
+        "properties": {
+          "gloss": {
+            "maxLength": 500,
+            "title": "Gloss",
+            "type": "string"
+          },
+          "pos": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Pos",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pos",
+          "gloss"
+        ],
+        "title": "SenseContext",
         "type": "object"
       },
       "SourceRef": {
@@ -2236,6 +2797,71 @@
         "title": "SourceRef",
         "type": "object"
       },
+      "Step_Literal__forms____senses____groups____grammar____definitions____equivalents____relations____dialect____examples____translations___": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "default": "",
+            "title": "Error",
+            "type": "string"
+          },
+          "section": {
+            "enum": [
+              "forms",
+              "senses",
+              "groups",
+              "grammar",
+              "definitions",
+              "equivalents",
+              "relations",
+              "dialect",
+              "examples",
+              "translations"
+            ],
+            "title": "Section",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "state"
+        ],
+        "title": "Step[Literal['forms', 'senses', 'groups', 'grammar', 'definitions', 'equivalents', 'relations', 'dialect', 'examples', 'translations']]",
+        "type": "object"
+      },
+      "Translation": {
+        "additionalProperties": false,
+        "properties": {
+          "example": {
+            "exclusiveMaximum": 100.0,
+            "minimum": 0.0,
+            "title": "Example",
+            "type": "integer"
+          },
+          "text": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "example",
+          "text"
+        ],
+        "title": "Translation",
+        "type": "object"
+      },
       "Usage": {
         "additionalProperties": false,
         "properties": {
@@ -2273,6 +2899,62 @@
         },
         "title": "Usage",
         "type": "object"
+      },
+      "View": {
+        "additionalProperties": false,
+        "properties": {
+          "base_revision": {
+            "title": "Base Revision",
+            "type": "integer"
+          },
+          "done": {
+            "title": "Done",
+            "type": "boolean"
+          },
+          "proposals": {
+            "$ref": "#/components/schemas/Proposals"
+          },
+          "requires_human_review": {
+            "const": true,
+            "default": true,
+            "title": "Requires Human Review",
+            "type": "boolean"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Material"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/Step_Literal__forms____senses____groups____grammar____definitions____equivalents____relations____dialect____examples____translations___"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "done",
+          "steps",
+          "base_revision",
+          "snapshot_id",
+          "proposals",
+          "sources"
+        ],
+        "title": "View",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -2284,7 +2966,7 @@
   },
   "info": {
     "title": "TSZ Agent",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -9301,6 +9983,558 @@
           }
         ],
         "summary": "Get Model Metrics"
+      }
+    },
+    "/v2/lexicon/advance": {
+      "post": {
+        "operationId": "advance_lexicon_v2_lexicon_advance_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Input"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/View"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Advance Lexicon"
+      }
+    },
+    "/v2/lexicon/capability": {
+      "get": {
+        "operationId": "supervisor_capability_v2_lexicon_capability_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Supervisor Capability V2 Lexicon Capability Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "title": "Code",
+                      "type": "string"
+                    },
+                    "detail": {
+                      "title": "Detail",
+                      "type": "string"
+                    },
+                    "status": {
+                      "title": "Status",
+                      "type": "integer"
+                    },
+                    "title": {
+                      "title": "Title",
+                      "type": "string"
+                    },
+                    "type": {
+                      "title": "Type",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "detail",
+                    "code"
+                  ],
+                  "title": "ProblemDetails",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Problem Details"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Supervisor Capability"
       }
     }
   }
