@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     tsz_base_url: AnyHttpUrl
     tsz_service_token: SecretStr
     deepseek_api_key: SecretStr | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
+    supervisor_enabled: bool = False
+    supervisor_model_url: str = "https://api.deepseek.com"
+    dictionary_search_key: SecretStr | None = None
+    merriam_webster_api_key: SecretStr | None = None
+    youdao_public_lookup_enabled: bool = False
     deepseek_model: Literal["deepseek-flash"] = "deepseek-flash"
     opencode_server_url: AnyHttpUrl | None = None
     opencode_server_password: SecretStr | None = None

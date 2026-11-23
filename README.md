@@ -1,6 +1,6 @@
 # tsz-agent
 
-独立的 Python 命题服务。DeepSeek 负责组合和语义复查；正确答案和干扰项只能引用 tsz-rust 返回的有效已发布词义。生成结果始终需要人工审核。
+天生会背的 Agent 服务。新版智能词库从 `v2` 进入 Super-Agent，总调度器读取词库与词典资料，按依赖执行各内容板块的 Agent，并将可编辑的结果交给后台草稿。原有 `v1` 助手和命题协议由兼容路由提供。
 
 ## 当前交付边界
 
@@ -18,7 +18,7 @@ uv run --env-file .env alembic upgrade head
 uv run uvicorn tsz_agent.app:create_app --factory --host 127.0.0.1 --port 8390
 ```
 
-另一个终端运行 worker：
+使用旧版命题队列时，在另一个终端运行 worker：
 
 ```sh
 uv run python -m tsz_agent.worker
@@ -130,6 +130,18 @@ uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --cancel-hand
 - 已知用量按调用 ID 独立幂等累计，任务取消、租约移交或结果写入失败不会丢弃回执。未知消费保守占用预算，可能提前停止重试；不保证供应商计费恰好一次。
 - 补查后的重新生成与复查共用原任务的调用、输出 token 和超时预算，不提高默认限额；结构修复重试或未知消费仍可能使任务以 `model_budget_exceeded` 终止。
 - 模型统计逐次保存到调用账本，包含生成/复查阶段、响应/错误/取消状态及耗时，结构修复重试单独计数。缓存命中率按已知回执的 token 加权计算；供应商缺失或返回不一致的缓存字段时保留 `null`，不当作零命中。新查询接口不改变已有 `RunView.usage` 契约，详见对接约定中的统计口径。
+
+## 智能词库 Super-Agent
+
+`supervisor/runtime.py` 持久化版本化计划、板块状态和供应商回执。`workflow.py` 管理词库的执行顺序，`lexicon.py` 注册各板块的任务、输出结构和校验，`tools.py` 负责受限词典检索，`gateway.py` 发送有界的单次模型请求。旧版问答和命题沿用各自的协议。
+
+显式执行 `uv run alembic upgrade head` 后启动 API。设置 `TSZ_AGENT_SUPERVISOR_ENABLED=true` 并提供 `DEEPSEEK_API_KEY`，Rust 通过现有服务凭据查询 `GET /v2/lexicon/capability`。有道、牛津、韦氏和剑桥各有独立的实时查询与正文解析代码。网页查询未取得资料时，可设置 `TSZ_AGENT_DICTIONARY_SEARCH_KEY` 从 Brave Search 获取摘要。模型地址默认 DeepSeek，隔离验收可将 `TSZ_AGENT_SUPERVISOR_MODEL_URL` 指向本机兼容服务并使用专属模拟凭据。运行数据归 Agent 独立数据库。
+
+有道的公开词典参考可通过 `TSZ_AGENT_YOUDAO_PUBLIC_LOOKUP_ENABLED=true` 启用，适用于本地非商业预览或已取得相应授权的环境。此入口遵循 `dict.youdao.com` 的 robots 规则，提取词性、音标和词形。牛津和剑桥从各自主词条提取词性及英美音标；韦氏的读音标记以原站记法展示，并保留词条列出的变形。站点拒绝访问时记录该来源的访问状态。正式商业使用应确认[有道词典服务条款](https://c.youdao.com/dict/law/youdao_dict_service.html)对应的授权。
+
+取得韦氏对本应用自动查询和使用返回资料的授权后，在 Agent 的私有配置中设置 `TSZ_AGENT_MERRIAM_WEBSTER_API_KEY` 并重启 API。韦氏随后改用官方 Collegiate API，只取匹配词条的词性、原站读音标记及词条列出的变形。未配置时沿用网页查询。API 失效或限流会显示该来源不可用。授权与品牌展示要求见[韦氏 API 条款](https://dictionaryapi.com/info/terms-of-service)及[官方 FAQ](https://dictionaryapi.com/info/frequently-asked-questions)。
+
+`POST /v2/lexicon/advance` 只接受 Rust 的服务身份。每次推进一个板块，同时返回此前的结果、来源和进度。重复请求使用同一 run ID 和快照。供应商结果未知时不重发，单板块显式重生成使用新 run ID。新链路不依赖旧命题 worker。迁移 `0008_supervisor` 含执行回执后会拒绝降级。兼容发布顺序为 Agent 迁移和服务、Rust、Admin。
 
 ## 验证
 
