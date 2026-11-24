@@ -180,6 +180,76 @@ async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(
 
 
 @pytest.mark.parametrize(
+    ("label", "target", "expected"),
+    [
+        ("chiefly British spelling of", "labor", "found"),
+        ("see also", "labor", "unavailable"),
+        ("chiefly British spelling of", "https://example.com/labor", "unavailable"),
+    ],
+)
+async def test_merriam_webster_collegiate_follows_exact_spelling_reference(
+    label, target, expected, caplog
+):
+    requested = []
+
+    def reply(req):
+        if req.url.host != "www.dictionaryapi.com":
+            return httpx.Response(404)
+        word = req.url.path.rsplit("/", 1)[-1]
+        requested.append(word)
+        if word == "labour":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "hwi": {"hw": "la*bour"},
+                        "cxs": [{"cxl": label, "cxtis": [{"cxt": target}]}],
+                    },
+                    {"hwi": {"hw": "la*bor"}, "fl": "noun"},
+                ],
+            )
+        assert word == "labor"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "hwi": {"hw": "la*bor", "prs": [{"mw": "ˈlā-bər"}]},
+                    "fl": "noun",
+                    "ins": [{"il": "plural", "if": "la*bors"}],
+                },
+                {
+                    "hwi": {"hw": "labor"},
+                    "fl": "verb",
+                    "ins": [{"if": "la*bored"}, {"if": "la*bor*ing"}, {"if": "la*bors"}],
+                },
+                {"hwi": {"hw": "laborer"}, "fl": "noun", "ins": [{"if": "laborers"}]},
+            ],
+        )
+
+    key = "test-only-spelling-reference-key"
+    caplog.set_level("INFO", logger="httpx")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        sources = await search_dictionaries(
+            "labour", None, client, merriam_webster_api_key=SecretStr(key)
+        )
+
+    source = next(row for row in sources if row.source == "Merriam-Webster")
+    assert source.status == expected
+    assert key not in caplog.text
+    if expected == "found":
+        assert requested == ["labour", "labor"]
+        assert source.locator == "https://www.merriam-webster.com/dictionary/labor"
+        assert source.excerpt == (
+            "labour · 词性 noun、verb · 读音标记 ˈlā-bər"
+            " · 词形 noun [labors] · 词形 verb [labored、laboring、labors]"
+            " · [ 英式拼写 labour、美式拼写 labor ]"
+        )
+    else:
+        assert requested == ["labour"]
+        assert source.excerpt == ""
+
+
+@pytest.mark.parametrize(
     ("word", "entries", "expected"),
     [
         (
@@ -548,6 +618,8 @@ async def test_oxford_follows_only_allowed_dictionary_redirects(entry_redirect, 
             ["It is nicer than before.", "I chose the nicest one."],
             "词形 adjective [比较级 nicer、最高级 nicest]",
         ),
+        ("flea", "noun", "", ["The dog has fleas."], "词形 noun [复数 fleas]"),
+        ("flea", "noun", "", ["The dog has fleas-related problems."], ""),
         ("book", "noun", "", ["He edits some books-related articles."], ""),
     ],
 )
@@ -571,6 +643,33 @@ def test_oxford_reads_headword_inflections_and_confirms_examples(
     if expected:
         excerpt += " · " + expected
     assert entry.excerpt(word, "") == excerpt
+
+
+@pytest.mark.parametrize("note_at_headword", [True, False])
+def test_oxford_reads_alternative_degrees_from_headword_note(note_at_headword):
+    entry = OxfordEntry("guilty")
+    note = (
+        '<span class="un" un="help"><span class="eb">more guilty</span> and '
+        '<span class="eb">most guilty</span> are more common</span>'
+    )
+    entry.feed(f"""
+        <div id="entryContent">
+            <div class="webtop">
+                <h1 class="headword">guilty</h1><span class="pos">adjective</span>
+                <div class="inflections">
+                    (comparative <span class="inflected_form">guiltier</span>,
+                    superlative <span class="inflected_form">guiltiest</span>)
+                </div>
+                {note if note_at_headword else ""}
+            </div>
+            {"" if note_at_headword else note}
+        </div>
+    """)
+
+    expected = "guilty · 词性 adjective · 词形 adjective [比较级 guiltier、最高级 guiltiest"
+    if note_at_headword:
+        expected += "、比较级 more guilty、最高级 most guilty"
+    assert entry.excerpt("guilty", "") == expected + "]"
 
 
 @pytest.mark.parametrize(

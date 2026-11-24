@@ -156,7 +156,38 @@ def _collegiate_entries(
         )
 
 
-def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: str = "") -> str:
+def _british_spelling_target(entries: list[dict[str, object]], word: str) -> str:
+    targets: set[str] = set()
+    for entry in entries:
+        head = entry.get("hwi")
+        if (
+            not isinstance(head, dict)
+            or _text(head.get("hw")).replace("*", "").casefold() != word.casefold()
+        ):
+            continue
+        for reference in _objects(entry.get("cxs")):
+            if _text(reference.get("cxl")).casefold() not in {
+                "british spelling of",
+                "chiefly british spelling of",
+            }:
+                continue
+            for item in _objects(reference.get("cxtis")):
+                targets.add(_text(item.get("cxt")).casefold())
+    if len(targets) == 1:
+        target = targets.pop()
+        if target != word.casefold() and re.fullmatch(r"[a-z]{2,40}", target):
+            return target
+    return ""
+
+
+def _entry_excerpt(
+    word: str,
+    entries: Iterable[MerriamWebsterEntry],
+    summary: str = "",
+    *,
+    american_spelling: str = "",
+) -> str:
+    base_spelling = (american_spelling or word).casefold()
     forms_by_pos: dict[str, list[str]] = {}
     headwords_by_pos: dict[str, list[str]] = {}
     indexed_by_pos: dict[str, list[str]] = {}
@@ -173,7 +204,7 @@ def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: s
                 headwords_by_pos.setdefault(position, []).extend(
                     f"原形 {headword}"
                     for headword in entry.headwords
-                    if headword.casefold() == word.casefold()
+                    if headword.casefold() == base_spelling
                 )
             if entry.indexed_inflections:
                 indexed_by_pos.setdefault(position, []).extend(entry.indexed_inflections)
@@ -199,6 +230,8 @@ def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: s
             parts.append(
                 f"索引词形 {position} [" + "、".join(f"{label} {form}" for form in indexed) + "]"
             )
+    if parts and american_spelling:
+        parts.append(f"[ 英式拼写 {word}、美式拼写 {american_spelling} ]")
 
     excerpt = word
     for part in parts:
@@ -211,37 +244,49 @@ def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: s
     return excerpt[:MAX_EXCERPT_LENGTH]
 
 
+async def _fetch_collegiate(client: httpx.AsyncClient, word: str, key: SecretStr) -> object:
+    async with client.stream(
+        "GET",
+        f"https://{API_HOST}{API_PATH}{quote(word, safe='')}",
+        params={"key": key.get_secret_value()},
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    ) as response:
+        if response.status_code != 200:
+            return None
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                return None
+            body.extend(chunk)
+    return json.loads(body)
+
+
 async def lookup_collegiate(
     client: httpx.AsyncClient, item: Material, word: str, key: SecretStr
 ) -> Material:
     item.status = "unavailable"
     try:
         async with asyncio.timeout(7):
-            async with client.stream(
-                "GET",
-                f"https://{API_HOST}{API_PATH}{quote(word, safe='')}",
-                params={"key": key.get_secret_value()},
-                headers={"Accept": "application/json"},
-                follow_redirects=False,
-            ) as response:
-                if response.status_code != 200:
-                    return item
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                        return item
-                    body.extend(chunk)
-            result = json.loads(body)
+            result = await _fetch_collegiate(client, word, key)
+            if not isinstance(result, list):
+                return item
+            if all(isinstance(match, str) for match in result):
+                # Empty lists and spelling suggestions contain no dictionary entries.
+                item.status = "no_match"
+                return item
+            entries = _objects(result)
+            excerpt = _entry_excerpt(word, _collegiate_entries(entries, word))
+            if not excerpt and (target := _british_spelling_target(entries, word)):
+                related = _objects(await _fetch_collegiate(client, target, key))
+                excerpt = _entry_excerpt(
+                    word, _collegiate_entries(related, target), american_spelling=target
+                )
+                if excerpt:
+                    item.locator = SOURCE.url(target)
     except (TimeoutError, httpx.HTTPError, ValueError, RecursionError):
         return item
 
-    if not isinstance(result, list):
-        return item
-    if all(isinstance(match, str) for match in result):
-        # Empty lists and spelling suggestions contain no dictionary entries.
-        item.status = "no_match"
-        return item
-    excerpt = _entry_excerpt(word, _collegiate_entries(_objects(result), word))
     if excerpt:
         item.status, item.excerpt = "found", excerpt
     return item
