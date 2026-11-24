@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from tsz_agent.storage import Conflict
 from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
+from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
 from tsz_agent.supervisor.lexicon import Input, Material, Scope, SenseContext
 from tsz_agent.supervisor.tools import search_dictionaries
 
@@ -496,6 +497,133 @@ async def test_oxford_follows_only_allowed_dictionary_redirects(entry_redirect, 
     else:
         assert len(entry_requests) == 1
         assert source.excerpt == ""
+
+
+@pytest.mark.parametrize(
+    ("word", "pos", "annotation", "examples", "expected"),
+    [
+        (
+            "child",
+            "noun",
+            '(plural <span class="inflected_form">children</span>'
+            '<span class="phonetics"><div class="phons_br"><span class="phon">/ˈtʃɪldrən/</span>'
+            "</div></span>)",
+            [],
+            "词形 noun [复数 children]",
+        ),
+        (
+            "study",
+            "noun",
+            '(plural <span class="inflected_form">studies</span>)',
+            ["Several studies support the conclusion."],
+            "词形 noun [复数 studies]",
+        ),
+        (
+            "formula",
+            "noun",
+            '(plural <span class="inflected_form">formulas</span> or '
+            '<span class="inflected_form">formulae</span>)',
+            [],
+            "词形 noun [复数 formulas、复数 formulae]",
+        ),
+        (
+            "happy",
+            "adjective",
+            '(comparative <span class="inflected_form">happier</span>, '
+            'superlative <span class="inflected_form">happiest</span>)',
+            [],
+            "词形 adjective [比较级 happier、最高级 happiest]",
+        ),
+        (
+            "book",
+            "noun",
+            "",
+            ["His desk was covered with piles of <b>books</b>."],
+            "词形 noun [复数 books]",
+        ),
+        (
+            "nice",
+            "adjective",
+            "",
+            ["It is nicer than before.", "I chose the nicest one."],
+            "词形 adjective [比较级 nicer、最高级 nicest]",
+        ),
+        ("book", "noun", "", ["He edits some books-related articles."], ""),
+    ],
+)
+def test_oxford_reads_headword_inflections_and_confirms_examples(
+    word, pos, annotation, examples, expected
+):
+    entry = OxfordEntry(word)
+    example_rows = "".join(f'<li><span class="x">{example}</span></li>' for example in examples)
+    entry.feed(f"""
+        <div id="entryContent">
+            <div class="webtop">
+                <h1 class="headword">{word}</h1><span class="pos">{pos}</span>
+                <span class="phons_br"><span class="phon">/head/</span></span>
+                <div class="inflections">{annotation}</div>
+            </div>
+            <span class="x">Some books outside the examples list.</span>
+            <ul class="examples">{example_rows}</ul>
+        </div>
+    """)
+    excerpt = f"{word} · 英 [head] · 词性 {pos}"
+    if expected:
+        excerpt += " · " + expected
+    assert entry.excerpt(word, "") == excerpt
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("noun", "verb"), ("verb", "noun"), ("verb", "adjective")],
+)
+async def test_oxford_merges_only_verified_opposite_part_of_speech(first, second):
+    urls = {"noun": "/definition/english/run_2", "verb": "/definition/english/run_1"}
+    pages = {}
+    requested = []
+    for pos, other in (("noun", "verb"), ("verb", "noun")):
+        body_pos = second if pos != first else first
+        pages[urls[pos]] = f"""
+            <div id="entryContent">
+                <div class="webtop">
+                    <h1 class="headword">run</h1><span class="pos">{body_pos}</span>
+                </div>
+                {
+            ('<ul class="examples"><li><span class="x">Our team won by four runs.</span></li></ul>')
+            if pos == "noun"
+            else ""
+        }
+                {
+            ('<table><tr><td class="verb_form">past simple ran</td></tr></table>')
+            if pos == "verb"
+            else ""
+        }
+            </div>
+            <a href="https://example.org{urls[other]}" title="run {other} definition">wrong host</a>
+            <a href="{urls[other]}" title="run {other} definition">related entry</a>
+        """
+
+    def reply(req):
+        assert req.url.host != "example.org"
+        if req.url.host != "www.oxfordlearnersdictionaries.com":
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        requested.append(req.url.path)
+        if req.url.path == "/definition/english/run":
+            return httpx.Response(302, headers={"Location": urls[first]})
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[req.url.path])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        sources = await search_dictionaries("run", None, client)
+    source = next(row for row in sources if row.source.startswith("Oxford"))
+    opposite = "verb" if first == "noun" else "noun"
+    assert requested == ["/definition/english/run", urls[first], urls[opposite]]
+    assert source.locator.endswith(urls[first])
+    assert source.status == "found"
+    assert ("词形 noun [复数 runs]" in source.excerpt) == (second != "adjective")
+    assert "词形 verb [过去式 ran]" in source.excerpt
+    assert "adjective" not in source.excerpt
 
 
 @pytest.mark.parametrize(

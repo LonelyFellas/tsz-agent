@@ -1,12 +1,21 @@
 """Read factual fields from the main entry of public dictionary pages."""
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Literal
 
 _VOID = set("area base br col embed hr img input link meta param source track wbr".split())
-Field = Literal["word", "pos", "uk", "us", "pronunciation", "form", "definition", "example"]
+Field = Literal[
+    "word", "pos", "uk", "us", "pronunciation", "form", "definition", "example", "inflection"
+]
+
+
+def regular_s_form(word: str) -> str:
+    if re.search(r"[^aeiou]y$", word):
+        return word[:-1] + "ies"
+    return word + ("es" if word.endswith(("s", "x", "z", "ch", "sh")) else "s")
 
 
 @dataclass

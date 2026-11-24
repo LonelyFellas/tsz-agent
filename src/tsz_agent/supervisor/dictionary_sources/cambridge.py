@@ -1,7 +1,7 @@
 import re
 from urllib.parse import quote
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field
+from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field, regular_s_form
 from .source import DictionarySource
 
 HOST = "dictionary.cambridge.org"
@@ -19,12 +19,6 @@ INFLECTION_LABELS = (
     ("plural", ("复数",)),
 )
 VERB_LABELS = {"现在分词", "过去式", "过去分词"}
-
-
-def regular_s_form(word: str) -> str:
-    if re.search(r"[^aeiou]y$", word):
-        return word[:-1] + "ies"
-    return word + ("es" if word.endswith(("s", "x", "z", "ch", "sh")) else "s")
 
 
 def regular_ing_form(word: str) -> str:
