@@ -18,15 +18,69 @@ INFLECTION_LABELS = (
     ("superlative", ("最高级",)),
     ("plural", ("复数",)),
 )
+VERB_LABELS = {"现在分词", "过去式", "过去分词"}
+
+
+def regular_s_form(word: str) -> str:
+    if re.search(r"[^aeiou]y$", word):
+        return word[:-1] + "ies"
+    return word + ("es" if word.endswith(("s", "x", "z", "ch", "sh")) else "s")
+
+
+def regular_ing_form(word: str) -> str:
+    if word.endswith("ie"):
+        return word[:-2] + "ying"
+    if word.endswith("e") and not word.endswith(("ee", "oe", "ye")):
+        return word[:-1] + "ing"
+    return word + "ing"
+
+
+def example_form_patterns(word: str, position: str) -> tuple[tuple[str, str], ...]:
+    s_form = re.escape(regular_s_form(word))
+    if position == "noun":
+        return (
+            (
+                "复数",
+                rf"(?<![\w-])(?:some|many|several|both|few|these|those|two|three)\s+"
+                rf"({s_form})(?![\w'-])",
+            ),
+        )
+
+    # Look for a direct object after the form. Avoid ambiguous predicate adjectives
+    # and occurrences where the spelling is part of a compound noun.
+    object_start = (
+        r"(?=\s+(?:a|an|the|this|that|my|your|his|her|its|our|their|me|him|it|us|them)\b)"
+    )
+    ing_form = re.escape(regular_ing_form(word))
+    progressive = (
+        r"(?<![\w-])(?:am|is|are|was|were|be|been|being)\s+"
+        r"(?:(?:currently|now|still|already|just|actively)\s+)?"
+    )
+    subject_noun = (
+        r"(?![a-z]+(?:s|ed|ing)\b)"
+        r"(?!(?:is|was|has|had|do|did|can|could|will|would|may|might|must|should|made|kept|let)\b)"
+        r"[a-z]+"
+    )
+    singular_subject = rf"^(?:he|she|it|(?:this|that)\s+{subject_noun})\s+"
+    return (
+        ("现在分词", rf"{progressive}({ing_form}){object_start}"),
+        ("第三人称单数", rf"{singular_subject}({s_form}){object_start}"),
+    )
 
 
 def field(
-    tag: str, classes: set[str], stack: list[Element], _: dict[Field, list[str]]
+    tag: str, classes: set[str], stack: list[Element], record: dict[Field, list[str]]
 ) -> Field | None:
     if tag == "span" and "dhw" in classes:
         return "word"
     if tag == "span" and "dpos" in classes and any("dpos-h" in parent.classes for parent in stack):
         return "pos"
+    if (
+        "deg" in classes
+        and record.get("pos") in (["noun"], ["verb"])
+        and any("dexamp" in parent.classes for parent in stack)
+    ):
+        return "example"
     if any("dinfg" in parent.classes for parent in stack):
         return None
     if "dinfg" in classes:
@@ -68,42 +122,77 @@ class CambridgeEntry(EntryFacts):
                     break
             else:
                 displayed.append(form)
-        return displayed
+        return list(dict.fromkeys(displayed))
 
-    def participle_candidate(self, linked: EntryFacts | None) -> tuple[str, str] | None:
-        # A linked British spelling is already verified by the source. Look for
-        # an individually listed participle only if the verb entries omit one.
+    def matching_records(self) -> list[dict[Field, list[str]]]:
+        records = super().matching_records()
+        if not re.fullmatch(r"[a-z]{2,32}", self.word):
+            return records
+        for position in ("noun", "verb"):
+            entries = [row for row in records if row.get("pos") == [position]]
+            examples = [example for row in entries for example in row.get("example", [])]
+            if not examples:
+                continue
+            listed = {
+                form.partition(" ")[0]
+                for row in entries
+                for form in self.display_forms(row.get("form", []))
+            }
+            confirmed = []
+            for label, pattern in example_form_patterns(self.word, position):
+                if label in listed:
+                    continue
+                for example in examples:
+                    if match := re.search(pattern, example, flags=re.I):
+                        confirmed.append(f"{label} {match[1]}")
+                        break
+            if confirmed:
+                records.append({"word": [self.word], "pos": [position], "form": confirmed})
+        return records
+
+    def verb_form_candidates(self, linked: EntryFacts | None) -> tuple[str, list[str]]:
         verbs = [row for row in self.matching_records() if row.get("pos") == ["verb"]]
-        if not verbs or any(
-            form.startswith("现在分词 ")
+        labels = {
+            form.partition(" ")[0]
             for row in verbs
             for form in self.display_forms(row.get("form", []))
-        ):
-            return None
+        }
         lemma = self.word
         if linked and any(row.get("pos") == ["verb"] for row in linked.matching_records()):
             lemma = linked.word
-        if not re.fullmatch(r"[a-z]{2,32}", lemma):
-            return None
-        if lemma.endswith("ie"):
-            stem = lemma[:-2] + "y"
-        elif lemma.endswith("e") and not lemma.endswith(("ee", "oe", "ye")):
-            stem = lemma[:-1]
-        else:
-            stem = lemma
-        return f"{stem}ing", lemma
+        if not verbs or not re.fullmatch(r"[a-z]{2,32}", lemma):
+            return lemma, []
 
-    def add_verified_participle(self, word: str, form: str, lemma: str, summary: str) -> bool:
-        heading = re.escape(f"{form} definition:")
+        candidates = []
+        if "现在分词" not in labels:
+            candidates.append(regular_ing_form(lemma))
+        if {"过去式", "过去分词"} - labels:
+            if lemma.endswith("e"):
+                past = lemma + "d"
+            elif re.search(r"[^aeiou]y$", lemma):
+                past = lemma[:-1] + "ied"
+            else:
+                past = lemma + "ed"
+            candidates.append(past)
+        return lemma, candidates
+
+    def add_verified_verb_forms(self, form: str, lemma: str, summary: str) -> None:
+        title = re.escape(f"{form} definition:")
         root = re.escape(lemma)
-        if not re.match(
-            rf"{heading}\s*(?:1\.\s*)?present participle of {root}(?=[:.]|\s+\d+\.\s|\s*$)",
-            summary,
-            flags=re.I,
-        ):
-            return False
-        self.records.append({"word": [word], "pos": ["verb"], "form": [f"现在分词 {form}"]})
-        return True
+        for relation, labels in INFLECTION_LABELS:
+            if all(label in VERB_LABELS for label in labels) and re.match(
+                rf"{title}\s*(?:1\.\s*)?{relation} of {root}(?=:|\.(?:\s|$)|\s+\d+\.\s|\s*$)",
+                summary,
+                flags=re.I,
+            ):
+                self.records.append(
+                    {
+                        "word": [self.word],
+                        "pos": ["verb"],
+                        "form": [f"{label} {form}" for label in labels],
+                    }
+                )
+                return
 
     def related_entry(self, locator: str, summary: str) -> tuple[str, str] | None:
         # The American lookup can be an explicit cross-reference to the British headword.
