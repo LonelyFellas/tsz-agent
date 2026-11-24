@@ -1,0 +1,82 @@
+name: Deploy Agent to tshb-test
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: agent-deploy-tshb-test
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'LonelyFellas/tsz-agent' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      vars.TSZ_AGENT_TSHB_TEST_DIR != ''
+    runs-on: ubuntu-24.04
+    environment: tshb-test
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_SHA: ${{ github.event.workflow_run.head_sha }}
+      CI_RUN_ID: ${{ github.event.workflow_run.id }}
+      CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+      CI_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Check current main
+        id: main
+        run: |
+          [[ "$CI_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$current" != "$CI_SHA" ]]; then
+            echo 'Agent deployment candidate is no longer current'
+          else
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check out the successful CI commit
+        if: steps.main.outputs.current == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Verify release source
+        if: steps.main.outputs.current == 'true'
+        id: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$CI_SHA"
+          if bash deploy/check-ci.sh "$CI_SHA" "$CI_RUN_ID" "$CI_RUN_NUMBER" "$CI_ATTEMPT"; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            result=$?
+            test "$result" = 3 || exit "$result"
+          fi
+      - name: Build and verify the Agent image
+        if: steps.candidate.outputs.current == 'true'
+        run: |
+          docker build --platform linux/amd64 --provenance=false \
+            --label "org.opencontainers.image.revision=$CI_SHA" \
+            --tag "tsz-agent:sha-$CI_SHA" .
+          bash deploy/smoke-image.sh "tsz-agent:sha-$CI_SHA"
+      - name: Deploy the verified image
+        if: steps.candidate.outputs.current == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.TSHB_TEST_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.TSHB_TEST_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.TSHB_TEST_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.TSHB_TEST_SSH_KNOWN_HOSTS }}
+          DEPLOY_ROOT: ${{ vars.TSZ_AGENT_TSHB_TEST_DIR }}
+          DEPLOY_PROJECT: ${{ vars.TSZ_AGENT_TSHB_TEST_PROJECT || 'tsz-agent' }}
+          DEPLOY_DATABASE: ${{ vars.TSZ_AGENT_TSHB_TEST_DATABASE }}
+        run: bash deploy/send-release.sh
