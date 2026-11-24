@@ -5,11 +5,11 @@ from uuid import uuid4
 import httpx
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import update
+from sqlalchemy import delete, text, update
 
 from tsz_agent.app import create_app
 from tsz_agent.storage import Conflict
-from tsz_agent.supervisor import candidates
+from tsz_agent.supervisor import candidates, dictionary_materials
 from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
@@ -111,6 +111,8 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
             return httpx.Response(
                 200, text="User-agent: *\nAllow: /", headers={"content-type": "text/plain"}
             )
+        if req.url.host == "www.dictionaryapi.com":
+            return httpx.Response(200, json=[])
         return httpx.Response(404)
 
     async def dictionary_client(headword, key, client, **options):
@@ -194,9 +196,134 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
         third = await send("refresh", refreshed)
         assert third["proposals"] == first["proposals"]
         assert await send("refresh", refreshed) == third
-        assert len(dictionary_requests) == 2 * len(requests_after_first)
+        assert dictionary_requests == requests_after_first
         assert model_calls == ["en-GB", "en-GB"]
         assert (await send("candidates", second))["candidate"]["source_run_id"] == third["run_id"]
+
+
+def dictionary_result(name):
+    source = runtime.DICTIONARIES[name]
+    return Material(
+        source=name,
+        locator=source.url("tomorrow"),
+        excerpt="tomorrow · 词性 noun",
+        status="found",
+    )
+
+
+async def test_only_missing_dictionary_is_queried_and_new_evidence_invalidates_candidate(
+    store, settings, monkeypatch
+):
+    body = request(["grammar"])
+    calls = []
+    models = []
+
+    async def search(*args, source_names, **options):
+        calls.append(source_names)
+        materials = [dictionary_result(name) for name in source_names]
+        if len(calls) == 1:
+            materials[-1].status = "unavailable"
+            materials[-1].excerpt = ""
+        return materials
+
+    async def model(settings, scope, section, view):
+        models.append(scope.run_id)
+        if len(models) == 2:
+            raise ValueError("invalid_output")
+        return {"items": [{"pos": "noun", "pattern": "by tomorrow"}]}, {}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", search)
+    monkeypatch.setattr(runtime, "infer", model)
+
+    first = await runtime.advance(store, settings, body)
+    assert first.steps[0].state == "completed"
+    assert (await runtime.lookup(store, settings, new_run(body))).candidate
+    other = new_run(body, entry_id=uuid4(), actor_id=uuid4())
+    assert (await runtime.advance(store, settings, other)).steps[0].state == "failed"
+    assert calls == [tuple(runtime.DICTIONARIES), (next(reversed(runtime.DICTIONARIES)),)]
+    assert (await runtime.lookup(store, settings, new_run(body))).candidate is None
+
+    latest = new_run(body)
+    result = await runtime.advance(store, settings, latest)
+    assert result.done and all(source.status == "found" for source in result.sources)
+    assert len(calls) == 2
+    assert models == [body.scope.run_id, other.scope.run_id, latest.scope.run_id]
+
+
+async def test_concurrent_dictionary_lookup_reuses_the_first_results(store, settings, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    first = request(["grammar"])
+    second = new_run(first, entry_id=uuid4(), actor_id=uuid4())
+
+    async def search(*args, source_names, **options):
+        calls.append(source_names)
+        entered.set()
+        await release.wait()
+        return [dictionary_result(name) for name in source_names]
+
+    async def model(*args):
+        return {"items": [{"pos": "noun", "pattern": "by tomorrow"}]}, {}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", search)
+    monkeypatch.setattr(runtime, "infer", model)
+    async with asyncio.TaskGroup() as tasks:
+        one = tasks.create_task(runtime.advance(store, settings, first))
+        await asyncio.wait_for(entered.wait(), 4)
+        two = tasks.create_task(runtime.advance(store, settings, second))
+        try:
+            async with asyncio.timeout(4), store.sessions() as db:
+                while not await db.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted)"
+                    )
+                ):
+                    await asyncio.sleep(0.01)
+        finally:
+            release.set()
+    assert one.result().sources == two.result().sources
+    assert calls == [tuple(runtime.DICTIONARIES)]
+
+
+async def test_refresh_uses_legacy_evidence_for_the_same_scope(store, settings, monkeypatch):
+    body = request(["grammar"])
+
+    async def search(*args, source_names, **options):
+        return [dictionary_result(name) for name in source_names]
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("references from a matching legacy candidate should be used")
+
+    async def model(*args):
+        return {"items": [{"pos": "noun", "pattern": "by tomorrow"}]}, {}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", search)
+    monkeypatch.setattr(runtime, "infer", model)
+    first = await runtime.advance(store, settings, body)
+
+    # Restore the storage shape from before evidence snapshots were added.
+    legacy = candidates.candidate_context(settings, body)
+    assert legacy is not None
+    async with store.sessions.begin() as db:
+        await db.execute(
+            update(candidates.StoredCandidate)
+            .where(candidates.StoredCandidate.source_run_id == first.run_id)
+            .values(fingerprint=legacy[0][3])
+        )
+        await db.execute(
+            delete(dictionary_materials.StoredDictionaryMaterial).where(
+                dictionary_materials.StoredDictionaryMaterial.query_key
+                == dictionary_materials.query_key(settings, body.scope.headword)
+            )
+        )
+
+    monkeypatch.setattr(runtime, "search_dictionaries", unexpected)
+    current = await runtime.lookup(store, settings, new_run(body))
+    assert current.candidate and current.candidate.source_run_id == first.run_id
+    refreshed = await runtime.advance(store, settings, new_run(body), force_refresh=True)
+    assert refreshed.done and refreshed.sources == first.sources
+    next_lookup = await runtime.lookup(store, settings, new_run(body))
+    assert next_lookup.candidate and next_lookup.candidate.source_run_id == refreshed.run_id
 
 
 async def test_only_current_success_can_replace_grammar_candidate(store, settings, monkeypatch):
