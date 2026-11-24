@@ -13,8 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tsz_agent.config import Settings
 from tsz_agent.storage import Store, digest
 
-from . import candidates, gateway, runtime
-from .lexicon import AGENTS, Input, Proposals, Scope, Section, View, plan, sense_list, validate_rows
+from . import candidates, dictionary_materials, gateway, runtime
+from .lexicon import (
+    AGENTS,
+    Input,
+    Material,
+    Proposals,
+    Scope,
+    Section,
+    View,
+    plan,
+    sense_list,
+    validate_rows,
+)
 from .tools import DICTIONARIES, search_dictionaries
 
 VERSION = "lexicon-supervisor-v1"
@@ -48,11 +59,8 @@ async def infer(
 
 
 async def lookup(store: Store, settings: Settings, body: Input) -> candidates.CandidateLookup:
-    context = candidates.candidate_context(settings, body)
-    if context is None:
-        return candidates.CandidateLookup(candidate=None)
     async with store.sessions() as db:
-        return candidates.CandidateLookup(candidate=await candidates.read(db, context[0], body))
+        return candidates.CandidateLookup(candidate=await candidates.current(db, settings, body))
 
 
 async def advance(
@@ -64,18 +72,16 @@ async def advance(
     disconnected: Callable[[], bool] | None = None,
 ) -> View:
     scope = body.scope
-    context = candidates.candidate_context(settings, body)
+    eligible = candidates.candidate_context(settings, body) is not None
 
     async def reuse(
         db: AsyncSession,
     ) -> tuple[runtime.Execution[Section], dict[str, Any]] | None:
-        if context is None:
-            return None
-        candidate = await candidates.read(db, context[0], body)
+        candidate = await candidates.current(db, settings, body)
         if candidate is None:
             return None
         return candidate.result, {
-            context[0][2]: {"state": "completed", "reused_from": str(candidate.source_run_id)}
+            scope.sections[0]: {"state": "completed", "reused_from": str(candidate.source_run_id)}
         }
 
     fingerprint_input = scope.model_dump(mode="json")
@@ -97,7 +103,7 @@ async def advance(
         VERSION,
         initial,
         {"model": settings.deepseek_model, "max_tokens": gateway.OUTPUT_LIMIT},
-        reuse=reuse if context is not None and not force_refresh else None,
+        reuse=reuse if eligible and not force_refresh else None,
     )
     view = View.model_validate(snapshot)
     if section is None:
@@ -107,16 +113,32 @@ async def advance(
     try:
         async with asyncio.timeout(43):
             if not any(s.source in DICTIONARIES for s in view.sources):
-                async with httpx.AsyncClient(follow_redirects=False) as client:
-                    view.sources.extend(
-                        await search_dictionaries(
+
+                async def fetch(names: tuple[str, ...]) -> list[Material]:
+                    async with httpx.AsyncClient(follow_redirects=False) as client:
+                        return await search_dictionaries(
                             scope.headword,
                             settings.dictionary_search_key,
                             client,
                             youdao_public_lookup=settings.youdao_public_lookup_enabled,
                             merriam_webster_api_key=settings.merriam_webster_api_key,
+                            source_names=names,
                         )
+
+                previous = {}
+                if eligible:
+                    async with store.sessions() as db:
+                        legacy = await candidates.legacy_candidate(db, settings, body)
+                    if legacy is not None:
+                        previous = dictionary_materials.reusable(legacy.result.sources)
+                view.sources.extend(
+                    await dictionary_materials.resolve(
+                        store,
+                        dictionary_materials.query_key(settings, scope.headword),
+                        previous,
+                        fetch,
                     )
+                )
             if section in {
                 "groups",
                 "definitions",
@@ -159,14 +181,16 @@ async def advance(
         pending.state, pending.error = "failed", "invalid_output"
 
     async def remember(db: AsyncSession, run: runtime.SupervisorRun) -> None:
-        if context is not None and (disconnected is None or not disconnected()):
+        if disconnected is None or not disconnected():
+            context = candidates.candidate_context(
+                settings, body, dictionary_materials.snapshot(view.sources)
+            )
+            assert context is not None
             key, versions = context
             await candidates.remember(
                 db, run, key, {**versions, "reported_model": receipt.get("model")}, view
             )
 
     return View.model_validate(
-        await runtime.finish(
-            store, view, pending, receipt, remember=remember if context is not None else None
-        )
+        await runtime.finish(store, view, pending, receipt, remember=remember if eligible else None)
     )

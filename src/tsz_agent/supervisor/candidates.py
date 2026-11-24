@@ -13,7 +13,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from tsz_agent.config import Settings
 from tsz_agent.storage import Base, digest
 
-from . import gateway
+from . import dictionary_materials, gateway
 from .lexicon import AGENTS, Input, Material, Proposals, Section, Strict, View, plan
 from .runtime import Step, SupervisorRun
 
@@ -51,7 +51,7 @@ class StoredCandidate(Base):
 
 
 def candidate_context(
-    settings: Settings, body: Input
+    settings: Settings, body: Input, material_snapshot: str | None = None
 ) -> tuple[CandidateKey, dict[str, Any]] | None:
     scope = body.scope
     if len(scope.sections) != 1:
@@ -73,6 +73,9 @@ def candidate_context(
         "youdao_public": settings.youdao_public_lookup_enabled,
         "merriam_webster_api": bool(settings.merriam_webster_api_key),
     }
+    if material_snapshot is not None:
+        versions["dictionary_materials"] = material_snapshot
+
     fingerprint = digest(
         {
             "scope": scope.model_dump(
@@ -104,6 +107,34 @@ async def read(db: AsyncSession, key: CandidateKey, body: Input) -> LexiconCandi
             sources=[Material.model_validate(source) for source in stored.sources],
         ),
     )
+
+
+async def legacy_candidate(
+    db: AsyncSession, settings: Settings, body: Input
+) -> LexiconCandidate | None:
+    context = candidate_context(settings, body)
+    return await read(db, context[0], body) if context else None
+
+
+async def current(db: AsyncSession, settings: Settings, body: Input) -> LexiconCandidate | None:
+    legacy_context = candidate_context(settings, body)
+    if legacy_context is None:
+        return None
+    legacy = await read(db, legacy_context[0], body)
+    previous = dictionary_materials.reusable(legacy.result.sources) if legacy else {}
+    persisted = await dictionary_materials.read(
+        db, dictionary_materials.query_key(settings, body.scope.headword)
+    )
+    effective = dictionary_materials.snapshot({**previous, **persisted}.values())
+    context = candidate_context(settings, body, effective)
+    assert context is not None
+    candidate = await read(db, context[0], body)
+    if candidate is not None:
+        return candidate
+    # Earlier candidates bring their own evidence only for the same editor and generation context.
+    if legacy is not None and dictionary_materials.snapshot(previous.values()) == effective:
+        return legacy
+    return None
 
 
 async def remember(

@@ -228,6 +228,7 @@ async def search_dictionaries(
     *,
     youdao_public_lookup: bool = False,
     merriam_webster_api_key: SecretStr | None = None,
+    source_names: tuple[str, ...] | None = None,
 ) -> list[Material]:
     async def lookup(source: DictionarySource) -> Material:
         if headword in {".", ".."}:
@@ -279,4 +280,5 @@ async def search_dictionaries(
             pass
         return item
 
-    return list(await asyncio.gather(*(lookup(source) for source in DICTIONARIES.values())))
+    selected = DICTIONARIES if source_names is None else source_names
+    return list(await asyncio.gather(*(lookup(DICTIONARIES[name]) for name in selected)))
