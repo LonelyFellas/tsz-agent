@@ -143,7 +143,7 @@ uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --cancel-hand
 
 取得韦氏对本应用自动查询和使用返回资料的授权后，在 Agent 的私有配置中设置 `TSZ_AGENT_MERRIAM_WEBSTER_API_KEY` 并重启 API。韦氏随后改用官方 Collegiate API，只取匹配词条的词性、原站读音标记及词条列出的变形。未配置时沿用网页查询。API 失效或限流会显示该来源不可用。授权与品牌展示要求见[韦氏 API 条款](https://dictionaryapi.com/info/terms-of-service)及[官方 FAQ](https://dictionaryapi.com/info/frequently-asked-questions)。
 
-`POST /v2/lexicon/advance` 只接受 Rust 的服务身份。每次推进一个板块，同时返回此前的结果、来源和进度。重复请求使用同一 run ID 和快照。供应商结果未知时不重发，单板块显式重生成使用新 run ID。新链路不依赖旧命题 worker。迁移 `0008_supervisor` 含执行回执后会拒绝降级。兼容发布顺序为 Agent 迁移和服务、Rust、Admin。
+`POST /v2/lexicon/advance` 只接受 Rust 的服务身份。每次推进一个板块，同时返回此前的结果、来源和进度。重复请求使用同一 run ID 和快照。供应商结果未知时不重发，单板块显式重生成使用新 run ID。新链路不依赖旧命题 worker。迁移 `0008_supervisor` 含执行回执后会拒绝降级。单板块词形和语法支持[候选复用与强制刷新](docs/features/lexicon-candidate-reuse/README.md)。兼容发布顺序为 Agent 迁移和服务、Rust、Admin。
 
 ## 验证
 

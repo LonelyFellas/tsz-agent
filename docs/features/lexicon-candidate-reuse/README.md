@@ -1,0 +1,27 @@
+# 智能词库候选入库与复用
+
+编辑在词形与发音、语法结构面板可以查看同一生成上下文的候选和生成时间，再显式回填草稿。Rust 原有的草稿保存、版本冲突和发布流程负责正式数据。结果始终要求人工核对。
+
+## 复用范围与写入
+
+仅复用请求及执行计划都恰好包含一个 `forms` 或 `grammar` 板块的结果。语法依赖先生成词形时照常执行原计划。「全部生成」和已有 run 的结果重放仍走原路径。旧 run 不做历史回填。
+
+键由 Agent 按编辑者、词条、板块和服务端输入指纹计算。指纹包含实际传给模型的词面、语言、词性、词义、例句和目录等输入，Rust 当前读取的有效内部发布版本及摘要，以及模型、提示词、校验与词典解析规则版本。更新共享提示词、校验或词典解析时应更新 `RULES_VERSION`。词形面板按现有输入规则生成，不附带无关的词义列表。run ID、草稿版本和界面快照是请求的绑定字段。候选命中时，结果使用本次请求的绑定字段，因此不改变模型输入的人工保存之后仍可沿用候选。
+
+候选表保存在 Agent 的 PostgreSQL。结构校验通过且有候选的结果，在有效执行完成事务中写入。重复投递沿用原结果，更新顺序以来源 run 的创建顺序为准。空结果、失败、已断连或超出执行期限的请求不更新复用记录。来源 run 仍记录原执行结果与回执。词典资料只保留原流程允许的来源和摘要。
+
+## 协议
+
+| 调用 | 行为 |
+| --- | --- |
+| Admin → Rust `POST /api/v1/admin/lexicon-next/entries/{id}/generation/candidates` | 使用单板块生成输入，返回 `{candidate: null}` 或含 `source_run_id`、`generated_at` 和 `result` 的候选。请求不生成 run，不查询外部词典或调用模型。 |
+| Admin → Rust `POST /api/v1/admin/lexicon-next/entries/{id}/generation` | 普通单板块生成优先命中复用记录。`force_refresh: true` 使用新 run 强制刷新，同一 run 续跑保留该选项。原生成结果格式保持兼容。 |
+| Rust → Agent `POST /v2/lexicon/{candidates,advance,refresh}` | 共用原有 `scope` 和 `materials` 请求结构及 Bearer 服务身份。Rust 按认证主体填充编辑者并在请求前后检查当前编辑权限和草稿版本。 |
+
+Admin 按 `x-tsz-next-generation-candidates: v1` 协商候选能力。旧 Admin 仍收到原能力格式。新 Admin 连接旧 Rust 或旧 Agent 时沿用原入口。新 Rust 遇到旧 Agent 缺少候选接口时视为未命中，缺少刷新接口时转发原生成接口。仅在路由不存在时走兼容回退。
+
+## 迁移与本地验证
+
+先显式执行 `uv run alembic upgrade head`，再使用新 Agent API。依次更新 Agent、Rust 和 Admin。迁移 `0009_lexicon_candidates` 新建候选表。停用新 Agent 后可降级至 `0008_supervisor` 以回退旧二进制，降级删除候选复用记录，保留原始执行与回执。重新升级创建空的候选表。
+
+`tests/test_supervisor.py` 在独占 `tsz_agent_test` 中覆盖两类候选持久化、重新绑定、直接读取、跨 run 复用、隔离、强制刷新和乱序。定向验证使用受控 HTTP 响应和模拟模型，分别统计词典 HTTP 和模型调用。配套验收从 Admin 检查重开、显式回填、保存、刷新和方言切换。

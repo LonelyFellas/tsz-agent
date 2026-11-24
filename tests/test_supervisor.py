@@ -1,15 +1,20 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
 import pytest
 from pydantic import SecretStr
+from sqlalchemy import update
 
+from tsz_agent.app import create_app
 from tsz_agent.storage import Conflict
+from tsz_agent.supervisor import candidates
 from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
 from tsz_agent.supervisor.lexicon import Input, Material, Scope, SenseContext
+from tsz_agent.supervisor.runtime import SupervisorRun
 from tsz_agent.supervisor.tools import search_dictionaries
 
 
@@ -72,6 +77,258 @@ async def test_concurrent_replay_and_invalid_sense_do_not_duplicate_calls(
     body.scope.actor_id = uuid4()
     with pytest.raises(Conflict):
         await runtime.advance(store, settings, body)
+
+
+def new_run(body, **scope_changes):
+    return body.model_copy(
+        update={"scope": body.scope.model_copy(update={"run_id": uuid4(), **scope_changes})}
+    )
+
+
+@pytest.mark.parametrize("section", ["forms", "grammar"])
+async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
+    store, settings, monkeypatch, section
+):
+    settings = settings.model_copy(
+        update={
+            "supervisor_enabled": True,
+            "deepseek_api_key": SecretStr("local-test-only"),
+            "youdao_public_lookup_enabled": True,
+            "merriam_webster_api_key": SecretStr("local-test-only"),
+        }
+    )
+    body = request([section])
+    body.materials = [
+        Material(source="智能词库", locator="entry@published-1", excerpt="明天", status="found")
+    ]
+    dictionary_requests = []
+    model_calls = []
+
+    def dictionary_reply(req):
+        dictionary_requests.append(req.url.host)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(
+                200, text="User-agent: *\nAllow: /", headers={"content-type": "text/plain"}
+            )
+        return httpx.Response(404)
+
+    async def dictionary_client(headword, key, client, **options):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(dictionary_reply)) as mock:
+            return await search_dictionaries(headword, key, mock, **options)
+
+    async def model(settings, instruction, context):
+        model_calls.append(context["target"])
+        if section == "grammar":
+            items = [{"pos": "noun", "pattern": "by tomorrow"}]
+        else:
+            variant = {"spelling": "tomorrow", "dict_phonetic": "təˈmɒrəʊ"}
+            items = [
+                {
+                    "pos": "noun",
+                    "forms": [
+                        {"form_type": "base", "is_regular": True, "uk": variant, "us": variant}
+                    ],
+                }
+            ]
+        return {"items": items}, {"model": "local-stub"}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", dictionary_client)
+    monkeypatch.setattr(runtime.gateway, "complete", model)
+    auth = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(create_app(settings, store)), base_url="http://agent.test"
+    ) as client:
+
+        async def send(operation, payload):
+            response = await client.post(
+                f"/v2/lexicon/{operation}", headers=auth, json=payload.model_dump(mode="json")
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        assert (await client.post("/v2/lexicon/candidates", json={})).status_code == 401
+        assert await send("candidates", body) == {"candidate": None}
+        assert not dictionary_requests and not model_calls
+        first = await send("advance", body)
+        assert first["done"] and first["requires_human_review"] and first["proposals"][section]
+        assert len(set(dictionary_requests)) == 4
+        requests_after_first = list(dictionary_requests)
+
+        # Snapshot and revision are rebound even after an unrelated manual save.
+        second = new_run(body, base_revision=3, snapshot_id="b" * 64)
+        read = (await send("candidates", second))["candidate"]
+        assert read["source_run_id"] == first["run_id"] and read["generated_at"]
+        assert read["result"]["run_id"] == str(second.scope.run_id)
+        assert read["result"]["base_revision"] == 3
+        assert read["result"]["snapshot_id"] == second.scope.snapshot_id
+        assert read["result"]["sources"] == first["sources"]
+        assert await send("advance", second) == read["result"]
+        assert await send("advance", second) == read["result"]
+        assert dictionary_requests == requests_after_first
+        assert model_calls == ["en-GB"]
+
+        for mismatched in (
+            new_run(body, actor_id=uuid4()),
+            new_run(body, entry_id=uuid4()),
+            new_run(body, headword="yesterday"),
+            new_run(body, target="en-US"),
+            new_run(body, medium="zh-Hant"),
+            new_run(body, senses=[SenseContext(pos="noun", gloss="隔天")]),
+            new_run(body, existing_pos=["verb"]),
+            new_run(body, catalog={"noun": ["base", "plural"]}),
+            new_run(body, examples=["See you tomorrow."]),
+            body.model_copy(
+                update={
+                    "materials": [
+                        body.materials[0].model_copy(update={"locator": "entry@published-2"})
+                    ]
+                }
+            ),
+        ):
+            assert await send("candidates", mismatched) == {"candidate": None}
+        with monkeypatch.context() as rules:
+            rules.setattr(candidates, "RULES_VERSION", "updated")
+            assert await send("candidates", body) == {"candidate": None}
+        refreshed = new_run(body)
+        third = await send("refresh", refreshed)
+        assert third["proposals"] == first["proposals"]
+        assert await send("refresh", refreshed) == third
+        assert len(dictionary_requests) == 2 * len(requests_after_first)
+        assert model_calls == ["en-GB", "en-GB"]
+        assert (await send("candidates", second))["candidate"]["source_run_id"] == third["run_id"]
+
+
+async def test_only_current_success_can_replace_grammar_candidate(store, settings, monkeypatch):
+    body = request(["grammar"])
+    started, release = asyncio.Event(), asyncio.Event()
+    slow = new_run(body)
+    cancelled = new_run(body)
+    expired = new_run(body)
+    first = new_run(body)
+    fresh = new_run(body)
+    empty = new_run(body)
+    invalid = new_run(body)
+
+    async def sources(*args, **kwargs):
+        return []
+
+    async def model(settings, scope, section, view):
+        if scope.run_id == slow.scope.run_id:
+            started.set()
+            await release.wait()
+        if scope.run_id == expired.scope.run_id:
+            async with store.sessions.begin() as session:
+                await session.execute(
+                    update(SupervisorRun)
+                    .where(SupervisorRun.id == scope.run_id)
+                    .values(deadline=datetime.now(UTC) - timedelta(seconds=1))
+                )
+        if scope.run_id == empty.scope.run_id:
+            return {"items": []}, {}
+        pos = "verb" if scope.run_id == invalid.scope.run_id else "noun"
+        return {"items": [{"pos": pos, "pattern": "until tomorrow"}]}, {}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", sources)
+    monkeypatch.setattr(runtime, "infer", model)
+
+    assert (await runtime.advance(store, settings, first)).done
+    older = asyncio.create_task(runtime.advance(store, settings, slow, force_refresh=True))
+    await asyncio.wait_for(started.wait(), 4)
+    try:
+        assert (await runtime.advance(store, settings, fresh, force_refresh=True)).done
+    finally:
+        release.set()
+        assert (await older).done
+
+    assert (await runtime.advance(store, settings, empty, force_refresh=True)).steps[
+        0
+    ].state == "completed"
+    assert (await runtime.advance(store, settings, invalid, force_refresh=True)).steps[
+        0
+    ].state == "failed"
+    assert (await runtime.advance(store, settings, expired, force_refresh=True)).done
+
+    def disconnected():
+        return True
+
+    assert (
+        await runtime.advance(
+            store, settings, cancelled, force_refresh=True, disconnected=disconnected
+        )
+    ).done
+    read = (await runtime.lookup(store, settings, new_run(body))).candidate
+    assert read and read.source_run_id == fresh.scope.run_id
+
+
+async def test_http_disconnect_fences_reuse_while_preserving_run_replay(
+    store, settings, monkeypatch
+):
+    settings = settings.model_copy(
+        update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
+    )
+    body = request(["grammar"])
+    started, release, disconnect = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    observed = asyncio.Event()
+
+    async def sources(*args, **kwargs):
+        return []
+
+    async def model(settings, scope, section, view):
+        started.set()
+        await release.wait()
+        return {"items": [{"pos": "noun", "pattern": "by tomorrow"}]}, {}
+
+    monkeypatch.setattr(runtime, "search_dictionaries", sources)
+    monkeypatch.setattr(runtime, "infer", model)
+    wire_body = body.model_dump_json().encode()
+    sent_body = False
+
+    async def receive():
+        nonlocal sent_body
+        if not sent_body:
+            sent_body = True
+            return {"type": "http.request", "body": wire_body, "more_body": False}
+        await disconnect.wait()
+        observed.set()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        pass
+
+    app = create_app(settings, store)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v2/lexicon/advance",
+        "query_string": b"",
+        "headers": [
+            (b"authorization", b"Bearer " + settings.api_token.get_secret_value().encode()),
+            (b"content-type", b"application/json"),
+        ],
+    }
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(app(scope, receive, send))
+        async with asyncio.timeout(4):
+            await started.wait()
+            disconnect.set()
+            await observed.wait()
+            release.set()
+
+    assert (await runtime.lookup(store, settings, new_run(body))).candidate is None
+    replay = await runtime.advance(store, settings, body)
+    assert replay.done and replay.proposals.grammar[0].pattern == "by tomorrow"
+    assert (await runtime.lookup(store, settings, new_run(body))).candidate is None
+
+
+def test_reuse_scope_preserves_multi_step_plans(settings):
+    assert candidates.candidate_context(settings, request(["forms", "grammar"])) is None
+    assert (
+        candidates.candidate_context(settings, new_run(request(["grammar"]), existing_pos=[]))
+        is None
+    )
 
 
 async def test_dictionary_source_status_from_actual_responses():

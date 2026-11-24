@@ -1,5 +1,6 @@
 """Domain-independent supervisor claims, recovery and per-agent receipts."""
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -7,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import DateTime, String, func, select, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tsz_agent.storage import Base, Conflict, Store
@@ -49,6 +51,9 @@ async def claim[K: str](
     version: str,
     initial: Execution[K],
     reservation: dict[str, Any],
+    *,
+    reuse: Callable[[AsyncSession], Awaitable[tuple[Execution[K], dict[str, Any]] | None]]
+    | None = None,
 ) -> tuple[dict[str, Any], K | None]:
     async with store.sessions.begin() as db:
         # Serialize admission per editor, including concurrent first requests.
@@ -66,14 +71,15 @@ async def claim[K: str](
             )
             if (recent or 0) >= 12:
                 raise AdmissionLimit
-            view = initial
+            reused = await reuse(db) if reuse is not None else None
+            view, receipts = reused if reused is not None else (initial, {})
             run = SupervisorRun(
                 id=initial.run_id,
                 actor=actor,
                 fingerprint=fingerprint,
                 version=version,
                 view=view.model_dump(mode="json"),
-                receipts={},
+                receipts=receipts,
                 deadline=None,
             )
             db.add(run)
@@ -102,7 +108,12 @@ async def claim[K: str](
 
 
 async def finish[K: str](
-    store: Store, view: Execution[K], pending: Step[K], receipt: dict[str, Any]
+    store: Store,
+    view: Execution[K],
+    pending: Step[K],
+    receipt: dict[str, Any],
+    *,
+    remember: Callable[[AsyncSession, SupervisorRun], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     async with store.sessions.begin() as db:
         run = await db.get(SupervisorRun, view.run_id, with_for_update=True)
@@ -116,5 +127,12 @@ async def finish[K: str](
             return current.model_dump(mode="json")
         view.done = all(s.state in {"completed", "failed"} for s in view.steps)
         run.view = view.model_dump(mode="json")
+        if (
+            remember is not None
+            and pending.state == "completed"
+            and run.deadline is not None
+            and run.deadline > datetime.now(UTC)
+        ):
+            await remember(db, run)
         run.deadline = None
     return view.model_dump(mode="json")

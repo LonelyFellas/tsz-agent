@@ -5,7 +5,7 @@ from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from tsz_agent.storage import Base
-from tsz_agent.supervisor import runtime  # noqa: F401 (register ORM metadata)
+from tsz_agent.supervisor import candidates  # noqa: F401 (register ORM metadata)
 
 
 def migrate(connection):
