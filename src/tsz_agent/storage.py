@@ -197,9 +197,10 @@ class Store:
             # Readiness requires the schema, not only a live database socket.
             await session.execute(select(Run).limit(1))
             revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision != "0008_supervisor":
+            if revision != "0009_lexicon_candidates":
                 raise RuntimeError("unsupported_database_revision")
             await session.execute(text("SELECT 1 FROM agent_supervisor_runs LIMIT 1"))
+            await session.execute(text("SELECT 1 FROM agent_lexicon_candidates LIMIT 1"))
 
     async def model_selection(self) -> ModelSelection:
         async with self.sessions() as session:
