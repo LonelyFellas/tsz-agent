@@ -1,7 +1,15 @@
 import re
 from urllib.parse import quote
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field, regular_s_form
+from ..entry_facts import (
+    EXAMPLE_PLURAL_CONTEXT,
+    Element,
+    EntryFacts,
+    EntryMarkup,
+    Field,
+    dialect_field,
+    regular_s_form,
+)
 from .source import DictionarySource
 
 HOST = "dictionary.cambridge.org"
@@ -18,6 +26,7 @@ INFLECTION_LABELS = (
     ("superlative", ("最高级",)),
     ("plural", ("复数",)),
 )
+FORM_LABELS = {label for _, labels in INFLECTION_LABELS for label in labels}
 VERB_LABELS = {"现在分词", "过去式", "过去分词"}
 
 
@@ -43,8 +52,8 @@ def example_form_patterns(word: str, position: str) -> tuple[tuple[str, str], ..
         return (
             (
                 "复数",
-                rf"(?<![\w-])(?:some|many|several|both|few|these|those|two|three)\s+"
-                rf"({s_form})(?![\w'-])",
+                rf"(?<![\w-])(?:some|many|several|both|few|these|those|two|three"
+                rf"|{EXAMPLE_PLURAL_CONTEXT})\s+({s_form})(?![\w'’-])",
             ),
         )
 
@@ -117,21 +126,37 @@ class CambridgeEntry(EntryFacts):
             data = "(r)"
         super().handle_data(data)
 
+    def handle_endtag(self, tag: str) -> None:
+        if self.stack and self.stack[-1].tag == tag and "dinf" in self.stack[-1].classes:
+            for parent in reversed(self.stack[:-1]):
+                if "dinfg" in parent.classes and parent.capture == "form":
+                    # A single grammar label can apply to multiple spelling nodes.
+                    parent.text.append("、")
+                    break
+        super().handle_endtag(tag)
+
     def display_forms(self, forms: list[str]) -> list[str]:
         displayed: list[str] = []
         for form in forms:
-            for prefix, labels in INFLECTION_LABELS:
+            labels: tuple[str, ...] = ()
+            for prefix, translated in INFLECTION_LABELS:
                 start = f"{prefix} "
                 if form.casefold().startswith(start):
-                    displayed.extend(f"{label} {form[len(start) :]}" for label in labels)
+                    labels = translated
+                    form = form[len(start) :]
                     break
+            spellings = [value.strip() for value in form.split("、") if value.strip()]
+            if labels:
+                displayed.extend(
+                    f"{label} {spelling}" for label in labels for spelling in spellings
+                )
             else:
-                displayed.append(form)
+                displayed.extend(spellings)
         labeled = {
             spelling.casefold()
             for form in displayed
             for label, _, spelling in (form.partition(" "),)
-            if label in VERB_LABELS
+            if label in FORM_LABELS
         }
         return [form for form in dict.fromkeys(displayed) if form.casefold() not in labeled]
 

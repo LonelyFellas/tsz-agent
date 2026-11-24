@@ -9,6 +9,7 @@ from tsz_agent.storage import Conflict
 from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
+from tsz_agent.supervisor.dictionary_sources.youdao import YoudaoSummary
 from tsz_agent.supervisor.lexicon import Input, Material, Scope, SenseContext
 from tsz_agent.supervisor.tools import search_dictionaries
 
@@ -466,6 +467,38 @@ async def test_youdao_uses_public_dictionary_rules_and_basic_entry(headword, rul
 
 
 @pytest.mark.parametrize(
+    ("collins_head", "basic_forms", "expected_forms"),
+    [
+        ("school", "", " · [ schooling、schooled、schools ]"),
+        ("unrelated", "", ""),
+        ("school", '<p class="additional">[ 复数 schools ]</p>', " · [复数 schools]"),
+    ],
+)
+def test_youdao_uses_matching_collins_forms_if_basic_entry_has_none(
+    collins_head, basic_forms, expected_forms
+):
+    reader = YoudaoSummary()
+    reader.feed(f"""
+        <div id="phrsListTab">
+            <h2><span class="keyword">school</span></h2>
+            <div class="trans-container">
+                <ul><li>n. School</li><li>v. Train</li></ul>
+                {basic_forms}
+            </div>
+        </div>
+        <div id="unrelated"><h4><span class="title">school</span>
+            <span class="additional pattern">( wrong )</span></h4></div>
+        <div id="collinsResult"><div class="wt-container">
+            <h4><span class="title">{collins_head}</span>
+                <span class="additional pattern">( schooling, schooled, schools )</span>
+            </h4>
+        </div></div>
+    """)
+    assert reader.excerpt("school", "") == "school · 词性 n.、v." + expected_forms
+    assert reader.excerpt("schoolyard", "") == ""
+
+
+@pytest.mark.parametrize(
     ("robots", "responses", "status", "entry_requests"),
     [
         ([503, 200], [502, 200], "found", 2),
@@ -628,6 +661,13 @@ async def test_oxford_follows_only_allowed_dictionary_redirects(entry_redirect, 
             "词形 noun [复数 venues]",
         ),
         ("venue", "noun", "", ["She wrote 20 different venues-related notes."], ""),
+        (
+            "division",
+            "noun",
+            "",
+            ["There are deep divisions in the party over the war."],
+            "词形 noun [复数 divisions]",
+        ),
         ("book", "noun", "", ["He edits some books-related articles."], ""),
     ],
 )
@@ -1013,6 +1053,45 @@ def test_cambridge_confirms_a_regular_plural_in_the_matching_noun_examples(noun_
     if confirmed:
         expected += " · 词形 noun [复数 tests]"
     assert entry.excerpt("test", "") == expected
+
+
+def test_cambridge_confirms_plural_in_a_partitive_noun_example():
+    entry = CambridgeEntry("division")
+    entry.feed("""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">division</span><span class="dpos">noun</span>
+            </div>
+            <div class="dexamp"><span class="deg">
+                The team plays in one of the <a>lower</a> divisions.
+            </span></div>
+        </div>
+    """)
+    assert entry.excerpt("division", "") == "division · 词性 noun · 词形 noun [复数 divisions]"
+
+
+def test_cambridge_keeps_alternative_inflections_as_separate_forms():
+    entry = CambridgeEntry("maximum")
+    entry.feed("""
+        <div class="entry-body__el"><div class="dpos-h">
+            <span class="dhw">maximum</span><span class="dpos">noun</span>
+            <span class="dinfls"><span class="dinfg">
+                <span class="dlab">plural</span> <b class="dinf">maxima</b>
+                <span class="us"><span class="ipa">ˈmæk.sə.mə</span></span>
+                <b class="dinf">maximums</b>
+            </span></span>
+        </div></div>
+        <div class="entry-body__el"><div class="dpos-h">
+            <span class="dhw">maximum</span><span class="dpos">noun</span>
+            <span class="dinfls">
+                <span class="dinfg"><span class="dlab">plural</span> <b class="dinf">maximums</b></span> |
+                <span class="dinfg"><b class="dinf">maxima</b></span>
+            </span>
+        </div></div>
+    """)
+    assert entry.excerpt("maximum", "") == (
+        "maximum · 词性 noun · 词形 noun [复数 maxima、复数 maximums]"
+    )
 
 
 async def test_cambridge_labels_unmarked_irregular_forms_from_their_entries():

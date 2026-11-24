@@ -3,7 +3,15 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field, regular_s_form
+from ..entry_facts import (
+    EXAMPLE_PLURAL_CONTEXT,
+    Element,
+    EntryFacts,
+    EntryMarkup,
+    Field,
+    dialect_field,
+    regular_s_form,
+)
 from .source import DictionarySource
 
 HOST = "www.oxfordlearnersdictionaries.com"
@@ -92,7 +100,7 @@ def example_patterns(word: str, pos: str) -> list[tuple[str, str]]:
         )
         plural_context = (
             r"(?:some|many|several|both|few|these|those|has|have|had"
-            rf"|{count}"
+            rf"|{count}|{EXAMPLE_PLURAL_CONTEXT}"
             r"|(?:piles|stacks|lots|dozens|hundreds|thousands) of|a (?:number|series) of)"
         )
         spelling = re.escape(regular_s_form(word))
