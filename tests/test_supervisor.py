@@ -1057,6 +1057,44 @@ async def test_cambridge_labels_unmarked_irregular_forms_from_their_entries():
     )
 
 
+async def test_cambridge_keeps_past_labels_from_later_dictionary_sections():
+    requested = []
+    unmarked = (
+        '<div class="entry-body__el"><div class="dpos-h">'
+        '<span class="dhw">take</span><span class="dpos">verb</span>'
+        '<span class="dinfg"><b class="dinf">took</b></span>'
+        '<span class="dinfg"><b class="dinf">taken</b></span>'
+        "</div></div>"
+    )
+    labeled = (
+        '<div class="entry-body__el"><div class="dpos-h">'
+        '<span class="dhw">take</span><span class="dpos">verb</span>'
+        '<span class="dinfg"><span class="dlab">past tense</span> <b class="dinf">took</b></span>'
+        '<span class="dinfg"><span class="dlab">past participle</span> <b class="dinf">taken</b></span>'
+        "</div></div>"
+    )
+    take_page = unmarked + " " * 450_000 + labeled
+
+    def respond(req):
+        if req.url.host != "dictionary.cambridge.org":
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        requested.append(req.url.path)
+        if req.url.path == "/dictionary/english/take":
+            return httpx.Response(200, headers={"Content-Type": "text/html"}, text=take_page)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("take", None, client)
+            if row.source == "Cambridge Dictionary"
+        )
+    assert requested == ["/dictionary/english/take", "/dictionary/english/taking"]
+    assert source.excerpt == "take · 词性 verb · 词形 verb [过去式 took、过去分词 taken]"
+
+
 @pytest.mark.parametrize(
     ("example", "expected"),
     [

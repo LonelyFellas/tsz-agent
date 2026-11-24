@@ -232,4 +232,6 @@ SOURCE = DictionarySource(
     HOST,
     lambda word: f"https://{HOST}/dictionary/english/{quote(word, safe='')}",
     reader=CambridgeEntry,
+    # Long entries can put explicitly labeled forms in a later dictionary section.
+    max_page_chars=600_000,
 )
