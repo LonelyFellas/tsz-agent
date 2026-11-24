@@ -7,8 +7,18 @@ from html.parser import HTMLParser
 from typing import Literal
 
 _VOID = set("area base br col embed hr img input link meta param source track wbr".split())
+EXAMPLE_PLURAL_CONTEXT = r"one of the(?: (?:lower|upper))?|there (?:are|were)(?: [a-z]+)?"
 Field = Literal[
-    "word", "pos", "uk", "us", "pronunciation", "form", "definition", "example", "inflection"
+    "word",
+    "pos",
+    "uk",
+    "us",
+    "pronunciation",
+    "form",
+    "definition",
+    "example",
+    "inflection",
+    "inflection_note",
 ]
 
 

@@ -1,7 +1,15 @@
 import re
 from urllib.parse import quote
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field, regular_s_form
+from ..entry_facts import (
+    EXAMPLE_PLURAL_CONTEXT,
+    Element,
+    EntryFacts,
+    EntryMarkup,
+    Field,
+    dialect_field,
+    regular_s_form,
+)
 from .source import DictionarySource
 
 HOST = "dictionary.cambridge.org"
@@ -18,6 +26,7 @@ INFLECTION_LABELS = (
     ("superlative", ("最高级",)),
     ("plural", ("复数",)),
 )
+FORM_LABELS = {label for _, labels in INFLECTION_LABELS for label in labels}
 VERB_LABELS = {"现在分词", "过去式", "过去分词"}
 
 
@@ -29,14 +38,22 @@ def regular_ing_form(word: str) -> str:
     return word + "ing"
 
 
+def regular_past_form(word: str) -> str:
+    if word.endswith("e"):
+        return word + "d"
+    if re.search(r"[^aeiou]y$", word):
+        return word[:-1] + "ied"
+    return word + "ed"
+
+
 def example_form_patterns(word: str, position: str) -> tuple[tuple[str, str], ...]:
     s_form = re.escape(regular_s_form(word))
     if position == "noun":
         return (
             (
                 "复数",
-                rf"(?<![\w-])(?:some|many|several|both|few|these|those|two|three)\s+"
-                rf"({s_form})(?![\w'-])",
+                rf"(?<![\w-])(?:some|many|several|both|few|these|those|two|three"
+                rf"|{EXAMPLE_PLURAL_CONTEXT})\s+({s_form})(?![\w'’-])",
             ),
         )
 
@@ -56,9 +73,12 @@ def example_form_patterns(word: str, position: str) -> tuple[tuple[str, str], ..
         r"[a-z]+"
     )
     singular_subject = rf"^(?:he|she|it|(?:this|that)\s+{subject_noun})\s+"
+    perfect = r"(?<![\w-])(?:has|have|had)\s+(?:(?:already|just|never|[a-z]+ly|well and truly)\s+)?"
+    past_form = re.escape(regular_past_form(word))
     return (
         ("现在分词", rf"{progressive}({ing_form}){object_start}"),
         ("第三人称单数", rf"{singular_subject}({s_form}){object_start}"),
+        ("过去分词", rf"{perfect}({past_form}){object_start}"),
     )
 
 
@@ -106,17 +126,39 @@ class CambridgeEntry(EntryFacts):
             data = "(r)"
         super().handle_data(data)
 
+    def handle_endtag(self, tag: str) -> None:
+        if self.stack and self.stack[-1].tag == tag and "dinf" in self.stack[-1].classes:
+            for parent in reversed(self.stack[:-1]):
+                if "dinfg" in parent.classes and parent.capture == "form":
+                    # A single grammar label can apply to multiple spelling nodes.
+                    parent.text.append("、")
+                    break
+        super().handle_endtag(tag)
+
     def display_forms(self, forms: list[str]) -> list[str]:
         displayed: list[str] = []
         for form in forms:
-            for prefix, labels in INFLECTION_LABELS:
+            labels: tuple[str, ...] = ()
+            for prefix, translated in INFLECTION_LABELS:
                 start = f"{prefix} "
                 if form.casefold().startswith(start):
-                    displayed.extend(f"{label} {form[len(start) :]}" for label in labels)
+                    labels = translated
+                    form = form[len(start) :]
                     break
+            spellings = [value.strip() for value in form.split("、") if value.strip()]
+            if labels:
+                displayed.extend(
+                    f"{label} {spelling}" for label in labels for spelling in spellings
+                )
             else:
-                displayed.append(form)
-        return list(dict.fromkeys(displayed))
+                displayed.extend(spellings)
+        labeled = {
+            spelling.casefold()
+            for form in displayed
+            for label, _, spelling in (form.partition(" "),)
+            if label in FORM_LABELS
+        }
+        return [form for form in dict.fromkeys(displayed) if form.casefold() not in labeled]
 
     def matching_records(self) -> list[dict[Field, list[str]]]:
         records = super().matching_records()
@@ -146,11 +188,8 @@ class CambridgeEntry(EntryFacts):
 
     def verb_form_candidates(self, linked: EntryFacts | None) -> tuple[str, list[str]]:
         verbs = [row for row in self.matching_records() if row.get("pos") == ["verb"]]
-        labels = {
-            form.partition(" ")[0]
-            for row in verbs
-            for form in self.display_forms(row.get("form", []))
-        }
+        forms = self.display_forms([form for row in verbs for form in row.get("form", [])])
+        labels = {form.partition(" ")[0] for form in forms}
         lemma = self.word
         if linked and any(row.get("pos") == ["verb"] for row in linked.matching_records()):
             lemma = linked.word
@@ -158,16 +197,19 @@ class CambridgeEntry(EntryFacts):
             return lemma, []
 
         candidates = []
+        ing = regular_ing_form(lemma)
         if "现在分词" not in labels:
-            candidates.append(regular_ing_form(lemma))
+            candidates.append(ing)
         if {"过去式", "过去分词"} - labels:
-            if lemma.endswith("e"):
-                past = lemma + "d"
-            elif re.search(r"[^aeiou]y$", lemma):
-                past = lemma[:-1] + "ied"
-            else:
-                past = lemma + "ed"
-            candidates.append(past)
+            # A headword may list irregular forms without labels. Verify those spellings first.
+            non_past = {lemma, ing, regular_s_form(lemma)}
+            unmarked = [
+                form
+                for form in forms
+                if form not in non_past and re.fullmatch(r"[a-z]{2,32}", form)
+            ]
+            past_candidates = list(dict.fromkeys([*unmarked, regular_past_form(lemma)]))
+            candidates.extend(past_candidates[:2])
         return lemma, candidates
 
     def add_verified_verb_forms(self, form: str, lemma: str, summary: str) -> None:
@@ -215,4 +257,6 @@ SOURCE = DictionarySource(
     HOST,
     lambda word: f"https://{HOST}/dictionary/english/{quote(word, safe='')}",
     reader=CambridgeEntry,
+    # Long entries can put explicitly labeled forms in a later dictionary section.
+    max_page_chars=600_000,
 )

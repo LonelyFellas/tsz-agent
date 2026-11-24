@@ -3,7 +3,15 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, dialect_field, regular_s_form
+from ..entry_facts import (
+    EXAMPLE_PLURAL_CONTEXT,
+    Element,
+    EntryFacts,
+    EntryMarkup,
+    Field,
+    dialect_field,
+    regular_s_form,
+)
 from .source import DictionarySource
 
 HOST = "www.oxfordlearnersdictionaries.com"
@@ -38,8 +46,11 @@ def field(
     if "phon" in classes:
         return dialect_field(stack, "phons_br", "phons_n_am")
     if tag == "span":
-        if "pos" in classes and any("webtop" in parent.classes for parent in stack):
-            return "pos"
+        if any("webtop" in parent.classes for parent in stack):
+            if "pos" in classes:
+                return "pos"
+            if "un" in classes and record.get("pos") in (["adjective"], ["adverb"]):
+                return "inflection_note"
         if "def" in classes:
             return "definition"
         if (
@@ -83,11 +94,17 @@ def example_patterns(word: str, pos: str) -> list[tuple[str, str]]:
     if not re.fullmatch(r"[a-z]{2,32}", word):
         return []
     if pos == "noun":
-        quantity = (
-            r"(?:some|many|several|both|few|these|those|two|three|four|five|six|seven|eight|nine|ten"
+        count = (
+            r"(?:two|three|four|five|six|seven|eight|nine|ten|(?<![.,])(?:[2-9]|[1-9][0-9]+))"
+            r"(?:\s+different)?"
+        )
+        plural_context = (
+            r"(?:some|many|several|both|few|these|those|has|have|had"
+            rf"|{count}|{EXAMPLE_PLURAL_CONTEXT}"
             r"|(?:piles|stacks|lots|dozens|hundreds|thousands) of|a (?:number|series) of)"
         )
-        return [("复数", rf"(?<![\w-]){quantity}\s+({re.escape(regular_s_form(word))})(?![\w'’-])")]
+        spelling = re.escape(regular_s_form(word))
+        return [("复数", rf"(?<![\w-]){plural_context}\s+({spelling})(?![\w'’-])")]
     if pos not in _GRADE_POS:
         return []
 
@@ -148,6 +165,11 @@ class OxfordEntry(EntryFacts):
             forms = [*row.get("form", [])]
             for annotation in row.get("inflection", []):
                 forms.extend(head_inflections(annotation, pos))
+            for note in row.get("inflection_note", []):
+                word = re.escape(self.word)
+                pattern = rf"(more {word}) and (most {word}) are more common\.?"
+                if match := re.fullmatch(pattern, note, flags=re.I):
+                    forms.extend([f"比较级 {match[1]}", f"最高级 {match[2]}"])
             examples = row.get("example", [])
             if examples:
                 listed = {form.partition(" ")[0] for form in forms}
@@ -161,6 +183,7 @@ class OxfordEntry(EntryFacts):
             if forms:
                 records[index] = {**row, "form": forms}
                 records[index].pop("inflection", None)
+                records[index].pop("inflection_note", None)
         return records
 
     def missing_position(self) -> str | None:
@@ -171,7 +194,7 @@ class OxfordEntry(EntryFacts):
                 for pos, other in _OPPOSITE_POS.items()
                 if pos in positions and other not in positions
             ),
-            None,
+            "noun" if positions & _GRADE_POS and "noun" not in positions else None,
         )
 
     def related_entry(self, locator: str, summary: str) -> tuple[str, str] | None:

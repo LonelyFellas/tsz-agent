@@ -13,6 +13,7 @@ from tsz_agent.supervisor import candidates
 from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
+from tsz_agent.supervisor.dictionary_sources.youdao import YoudaoSummary
 from tsz_agent.supervisor.lexicon import Input, Material, Scope, SenseContext
 from tsz_agent.supervisor.runtime import SupervisorRun
 from tsz_agent.supervisor.tools import search_dictionaries
@@ -437,6 +438,76 @@ async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(
 
 
 @pytest.mark.parametrize(
+    ("label", "target", "expected"),
+    [
+        ("chiefly British spelling of", "labor", "found"),
+        ("see also", "labor", "unavailable"),
+        ("chiefly British spelling of", "https://example.com/labor", "unavailable"),
+    ],
+)
+async def test_merriam_webster_collegiate_follows_exact_spelling_reference(
+    label, target, expected, caplog
+):
+    requested = []
+
+    def reply(req):
+        if req.url.host != "www.dictionaryapi.com":
+            return httpx.Response(404)
+        word = req.url.path.rsplit("/", 1)[-1]
+        requested.append(word)
+        if word == "labour":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "hwi": {"hw": "la*bour"},
+                        "cxs": [{"cxl": label, "cxtis": [{"cxt": target}]}],
+                    },
+                    {"hwi": {"hw": "la*bor"}, "fl": "noun"},
+                ],
+            )
+        assert word == "labor"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "hwi": {"hw": "la*bor", "prs": [{"mw": "ˈlā-bər"}]},
+                    "fl": "noun",
+                    "ins": [{"il": "plural", "if": "la*bors"}],
+                },
+                {
+                    "hwi": {"hw": "labor"},
+                    "fl": "verb",
+                    "ins": [{"if": "la*bored"}, {"if": "la*bor*ing"}, {"if": "la*bors"}],
+                },
+                {"hwi": {"hw": "laborer"}, "fl": "noun", "ins": [{"if": "laborers"}]},
+            ],
+        )
+
+    key = "test-only-spelling-reference-key"
+    caplog.set_level("INFO", logger="httpx")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        sources = await search_dictionaries(
+            "labour", None, client, merriam_webster_api_key=SecretStr(key)
+        )
+
+    source = next(row for row in sources if row.source == "Merriam-Webster")
+    assert source.status == expected
+    assert key not in caplog.text
+    if expected == "found":
+        assert requested == ["labour", "labor"]
+        assert source.locator == "https://www.merriam-webster.com/dictionary/labor"
+        assert source.excerpt == (
+            "labour · 词性 noun、verb · 读音标记 ˈlā-bər"
+            " · 词形 noun [labors] · 词形 verb [labored、laboring、labors]"
+            " · [ 英式拼写 labour、美式拼写 labor ]"
+        )
+    else:
+        assert requested == ["labour"]
+        assert source.excerpt == ""
+
+
+@pytest.mark.parametrize(
     ("word", "entries", "expected"),
     [
         (
@@ -653,6 +724,38 @@ async def test_youdao_uses_public_dictionary_rules_and_basic_entry(headword, rul
 
 
 @pytest.mark.parametrize(
+    ("collins_head", "basic_forms", "expected_forms"),
+    [
+        ("school", "", " · [ schooling、schooled、schools ]"),
+        ("unrelated", "", ""),
+        ("school", '<p class="additional">[ 复数 schools ]</p>', " · [复数 schools]"),
+    ],
+)
+def test_youdao_uses_matching_collins_forms_if_basic_entry_has_none(
+    collins_head, basic_forms, expected_forms
+):
+    reader = YoudaoSummary()
+    reader.feed(f"""
+        <div id="phrsListTab">
+            <h2><span class="keyword">school</span></h2>
+            <div class="trans-container">
+                <ul><li>n. School</li><li>v. Train</li></ul>
+                {basic_forms}
+            </div>
+        </div>
+        <div id="unrelated"><h4><span class="title">school</span>
+            <span class="additional pattern">( wrong )</span></h4></div>
+        <div id="collinsResult"><div class="wt-container">
+            <h4><span class="title">{collins_head}</span>
+                <span class="additional pattern">( schooling, schooled, schools )</span>
+            </h4>
+        </div></div>
+    """)
+    assert reader.excerpt("school", "") == "school · 词性 n.、v." + expected_forms
+    assert reader.excerpt("schoolyard", "") == ""
+
+
+@pytest.mark.parametrize(
     ("robots", "responses", "status", "entry_requests"),
     [
         ([503, 200], [502, 200], "found", 2),
@@ -805,6 +908,23 @@ async def test_oxford_follows_only_allowed_dictionary_redirects(entry_redirect, 
             ["It is nicer than before.", "I chose the nicest one."],
             "词形 adjective [比较级 nicer、最高级 nicest]",
         ),
+        ("flea", "noun", "", ["The dog has fleas."], "词形 noun [复数 fleas]"),
+        ("flea", "noun", "", ["The dog has fleas-related problems."], ""),
+        (
+            "venue",
+            "noun",
+            "",
+            ["The band will be playing at <b>20 different</b> venues on their UK tour."],
+            "词形 noun [复数 venues]",
+        ),
+        ("venue", "noun", "", ["She wrote 20 different venues-related notes."], ""),
+        (
+            "division",
+            "noun",
+            "",
+            ["There are deep divisions in the party over the war."],
+            "词形 noun [复数 divisions]",
+        ),
         ("book", "noun", "", ["He edits some books-related articles."], ""),
     ],
 )
@@ -828,6 +948,33 @@ def test_oxford_reads_headword_inflections_and_confirms_examples(
     if expected:
         excerpt += " · " + expected
     assert entry.excerpt(word, "") == excerpt
+
+
+@pytest.mark.parametrize("note_at_headword", [True, False])
+def test_oxford_reads_alternative_degrees_from_headword_note(note_at_headword):
+    entry = OxfordEntry("guilty")
+    note = (
+        '<span class="un" un="help"><span class="eb">more guilty</span> and '
+        '<span class="eb">most guilty</span> are more common</span>'
+    )
+    entry.feed(f"""
+        <div id="entryContent">
+            <div class="webtop">
+                <h1 class="headword">guilty</h1><span class="pos">adjective</span>
+                <div class="inflections">
+                    (comparative <span class="inflected_form">guiltier</span>,
+                    superlative <span class="inflected_form">guiltiest</span>)
+                </div>
+                {note if note_at_headword else ""}
+            </div>
+            {"" if note_at_headword else note}
+        </div>
+    """)
+
+    expected = "guilty · 词性 adjective · 词形 adjective [比较级 guiltier、最高级 guiltiest"
+    if note_at_headword:
+        expected += "、比较级 more guilty、最高级 most guilty"
+    assert entry.excerpt("guilty", "") == expected + "]"
 
 
 @pytest.mark.parametrize(
@@ -881,6 +1028,47 @@ async def test_oxford_merges_only_verified_opposite_part_of_speech(first, second
     assert ("词形 noun [复数 runs]" in source.excerpt) == (second != "adjective")
     assert "词形 verb [过去式 ran]" in source.excerpt
     assert "adjective" not in source.excerpt
+
+
+async def test_oxford_follows_noun_link_from_adverb_entry():
+    host = "www.oxfordlearnersdictionaries.com"
+    root = "/definition/english/"
+    pages = {
+        "maximum_1": """
+            <div id="entryContent"><div class="webtop">
+                <h1 class="headword">maximum</h1><span class="pos">adverb</span>
+            </div></div>
+            <a href="/definition/english/maximum_2" title="maximum adjective definition"></a>
+            <a href="/definition/english/maximum_3" title="maximum noun definition"></a>
+        """,
+        "maximum_3": """
+            <div id="entryContent"><div class="webtop">
+                <h1 class="headword">maximum</h1><span class="pos">noun</span>
+                <div class="inflections">(plural <span class="inflected_form">maxima</span>)</div>
+            </div></div>
+        """,
+    }
+    requested = []
+
+    def respond(req):
+        if req.url.host != host:
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        slug = req.url.path.removeprefix(root)
+        requested.append(slug)
+        if slug == "maximum":
+            return httpx.Response(302, headers={"Location": root + "maximum_1"})
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[slug])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("maximum", None, client)
+            if row.source.startswith("Oxford")
+        )
+    assert requested == ["maximum", "maximum_1", "maximum_3"]
+    assert source.excerpt == "maximum · 词性 adverb、noun · 词形 noun [复数 maxima]"
 
 
 @pytest.mark.parametrize(
@@ -1122,6 +1310,145 @@ def test_cambridge_confirms_a_regular_plural_in_the_matching_noun_examples(noun_
     if confirmed:
         expected += " · 词形 noun [复数 tests]"
     assert entry.excerpt("test", "") == expected
+
+
+def test_cambridge_confirms_plural_in_a_partitive_noun_example():
+    entry = CambridgeEntry("division")
+    entry.feed("""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">division</span><span class="dpos">noun</span>
+            </div>
+            <div class="dexamp"><span class="deg">
+                The team plays in one of the <a>lower</a> divisions.
+            </span></div>
+        </div>
+    """)
+    assert entry.excerpt("division", "") == "division · 词性 noun · 词形 noun [复数 divisions]"
+
+
+def test_cambridge_keeps_alternative_inflections_as_separate_forms():
+    entry = CambridgeEntry("maximum")
+    entry.feed("""
+        <div class="entry-body__el"><div class="dpos-h">
+            <span class="dhw">maximum</span><span class="dpos">noun</span>
+            <span class="dinfls"><span class="dinfg">
+                <span class="dlab">plural</span> <b class="dinf">maxima</b>
+                <span class="us"><span class="ipa">ˈmæk.sə.mə</span></span>
+                <b class="dinf">maximums</b>
+            </span></span>
+        </div></div>
+        <div class="entry-body__el"><div class="dpos-h">
+            <span class="dhw">maximum</span><span class="dpos">noun</span>
+            <span class="dinfls">
+                <span class="dinfg"><span class="dlab">plural</span> <b class="dinf">maximums</b></span> |
+                <span class="dinfg"><b class="dinf">maxima</b></span>
+            </span>
+        </div></div>
+    """)
+    assert entry.excerpt("maximum", "") == (
+        "maximum · 词性 noun · 词形 noun [复数 maxima、复数 maximums]"
+    )
+
+
+async def test_cambridge_labels_unmarked_irregular_forms_from_their_entries():
+    host = "dictionary.cambridge.org"
+    pages = {
+        "take": """
+            <div class="entry-body__el"><div class="dpos-h">
+                <span class="dhw">take</span><span class="dpos">verb</span>
+                <span class="dinfls">
+                    <span class="dinfg"><b class="dinf">took</b></span> |
+                    <span class="dinfg"><b class="dinf">taken</b></span>
+                </span>
+            </div></div>
+        """,
+        "taking": '<meta name="description" content="TAKING definition: 1. present participle of take">',
+        "took": '<meta name="description" content="TOOK definition: 1. past simple of take">',
+        "taken": '<meta name="description" content="TAKEN definition: 1. past participle of take">',
+    }
+    requested = []
+
+    def respond(req):
+        if req.url.host != host:
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        word = req.url.path.rsplit("/", 1)[-1]
+        requested.append(word)
+        if word not in pages:
+            return httpx.Response(404)
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[word])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("take", None, client)
+            if row.source == "Cambridge Dictionary"
+        )
+    assert set(requested) == set(pages)
+    assert (
+        source.excerpt
+        == "take · 词性 verb · 词形 verb [现在分词 taking、过去式 took、过去分词 taken]"
+    )
+
+
+async def test_cambridge_keeps_past_labels_from_later_dictionary_sections():
+    requested = []
+    unmarked = (
+        '<div class="entry-body__el"><div class="dpos-h">'
+        '<span class="dhw">take</span><span class="dpos">verb</span>'
+        '<span class="dinfg"><b class="dinf">took</b></span>'
+        '<span class="dinfg"><b class="dinf">taken</b></span>'
+        "</div></div>"
+    )
+    labeled = (
+        '<div class="entry-body__el"><div class="dpos-h">'
+        '<span class="dhw">take</span><span class="dpos">verb</span>'
+        '<span class="dinfg"><span class="dlab">past tense</span> <b class="dinf">took</b></span>'
+        '<span class="dinfg"><span class="dlab">past participle</span> <b class="dinf">taken</b></span>'
+        "</div></div>"
+    )
+    take_page = unmarked + " " * 450_000 + labeled
+
+    def respond(req):
+        if req.url.host != "dictionary.cambridge.org":
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        requested.append(req.url.path)
+        if req.url.path == "/dictionary/english/take":
+            return httpx.Response(200, headers={"Content-Type": "text/html"}, text=take_page)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("take", None, client)
+            if row.source == "Cambridge Dictionary"
+        )
+    assert requested == ["/dictionary/english/take", "/dictionary/english/taking"]
+    assert source.excerpt == "take · 词性 verb · 词形 verb [过去式 took、过去分词 taken]"
+
+
+@pytest.mark.parametrize(
+    ("example", "expected"),
+    [
+        ("This puzzle has well and <a>truly</a> foxed me!", " · 词形 verb [过去分词 foxed]"),
+        ("This puzzle had foxed-based clues.", ""),
+    ],
+)
+def test_cambridge_confirms_past_participle_from_a_perfect_verb_example(example, expected):
+    entry = CambridgeEntry("fox")
+    entry.feed(f"""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">fox</span><span class="dpos">verb</span>
+            </div>
+            <div class="dexamp"><span class="deg">{example}</span></div>
+        </div>
+    """)
+    assert entry.excerpt("fox", "") == "fox · 词性 verb" + expected
 
 
 @pytest.mark.parametrize(
