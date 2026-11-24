@@ -186,7 +186,7 @@ class OxfordEntry(EntryFacts):
                 for pos, other in _OPPOSITE_POS.items()
                 if pos in positions and other not in positions
             ),
-            None,
+            "noun" if positions & _GRADE_POS and "noun" not in positions else None,
         )
 
     def related_entry(self, locator: str, summary: str) -> tuple[str, str] | None:

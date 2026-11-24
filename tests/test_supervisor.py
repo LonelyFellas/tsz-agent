@@ -733,6 +733,47 @@ async def test_oxford_merges_only_verified_opposite_part_of_speech(first, second
     assert "adjective" not in source.excerpt
 
 
+async def test_oxford_follows_noun_link_from_adverb_entry():
+    host = "www.oxfordlearnersdictionaries.com"
+    root = "/definition/english/"
+    pages = {
+        "maximum_1": """
+            <div id="entryContent"><div class="webtop">
+                <h1 class="headword">maximum</h1><span class="pos">adverb</span>
+            </div></div>
+            <a href="/definition/english/maximum_2" title="maximum adjective definition"></a>
+            <a href="/definition/english/maximum_3" title="maximum noun definition"></a>
+        """,
+        "maximum_3": """
+            <div id="entryContent"><div class="webtop">
+                <h1 class="headword">maximum</h1><span class="pos">noun</span>
+                <div class="inflections">(plural <span class="inflected_form">maxima</span>)</div>
+            </div></div>
+        """,
+    }
+    requested = []
+
+    def respond(req):
+        if req.url.host != host:
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        slug = req.url.path.removeprefix(root)
+        requested.append(slug)
+        if slug == "maximum":
+            return httpx.Response(302, headers={"Location": root + "maximum_1"})
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[slug])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("maximum", None, client)
+            if row.source.startswith("Oxford")
+        )
+    assert requested == ["maximum", "maximum_1", "maximum_3"]
+    assert source.excerpt == "maximum · 词性 adverb、noun · 词形 noun [复数 maxima]"
+
+
 @pytest.mark.parametrize(
     ("status", "html", "expected"),
     [
@@ -972,6 +1013,68 @@ def test_cambridge_confirms_a_regular_plural_in_the_matching_noun_examples(noun_
     if confirmed:
         expected += " · 词形 noun [复数 tests]"
     assert entry.excerpt("test", "") == expected
+
+
+async def test_cambridge_labels_unmarked_irregular_forms_from_their_entries():
+    host = "dictionary.cambridge.org"
+    pages = {
+        "take": """
+            <div class="entry-body__el"><div class="dpos-h">
+                <span class="dhw">take</span><span class="dpos">verb</span>
+                <span class="dinfls">
+                    <span class="dinfg"><b class="dinf">took</b></span> |
+                    <span class="dinfg"><b class="dinf">taken</b></span>
+                </span>
+            </div></div>
+        """,
+        "taking": '<meta name="description" content="TAKING definition: 1. present participle of take">',
+        "took": '<meta name="description" content="TOOK definition: 1. past simple of take">',
+        "taken": '<meta name="description" content="TAKEN definition: 1. past participle of take">',
+    }
+    requested = []
+
+    def respond(req):
+        if req.url.host != host:
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        word = req.url.path.rsplit("/", 1)[-1]
+        requested.append(word)
+        if word not in pages:
+            return httpx.Response(404)
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[word])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        source = next(
+            row
+            for row in await search_dictionaries("take", None, client)
+            if row.source == "Cambridge Dictionary"
+        )
+    assert set(requested) == set(pages)
+    assert (
+        source.excerpt
+        == "take · 词性 verb · 词形 verb [现在分词 taking、过去式 took、过去分词 taken]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("example", "expected"),
+    [
+        ("This puzzle has well and <a>truly</a> foxed me!", " · 词形 verb [过去分词 foxed]"),
+        ("This puzzle had foxed-based clues.", ""),
+    ],
+)
+def test_cambridge_confirms_past_participle_from_a_perfect_verb_example(example, expected):
+    entry = CambridgeEntry("fox")
+    entry.feed(f"""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">fox</span><span class="dpos">verb</span>
+            </div>
+            <div class="dexamp"><span class="deg">{example}</span></div>
+        </div>
+    """)
+    assert entry.excerpt("fox", "") == "fox · 词性 verb" + expected
 
 
 @pytest.mark.parametrize(
