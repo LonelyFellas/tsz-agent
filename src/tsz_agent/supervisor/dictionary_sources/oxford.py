@@ -86,9 +86,13 @@ def example_patterns(word: str, pos: str) -> list[tuple[str, str]]:
     if not re.fullmatch(r"[a-z]{2,32}", word):
         return []
     if pos == "noun":
+        count = (
+            r"(?:two|three|four|five|six|seven|eight|nine|ten|(?<![.,])(?:[2-9]|[1-9][0-9]+))"
+            r"(?:\s+different)?"
+        )
         plural_context = (
             r"(?:some|many|several|both|few|these|those|has|have|had"
-            r"|two|three|four|five|six|seven|eight|nine|ten"
+            rf"|{count}"
             r"|(?:piles|stacks|lots|dozens|hundreds|thousands) of|a (?:number|series) of)"
         )
         spelling = re.escape(regular_s_form(word))
