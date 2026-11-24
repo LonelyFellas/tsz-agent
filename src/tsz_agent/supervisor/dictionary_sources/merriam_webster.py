@@ -23,6 +23,7 @@ INDEX_FORM_LABELS = {"noun": "复数", "verb": "第三人称单数"}
 
 @dataclass(frozen=True)
 class MerriamWebsterEntry:
+    headwords: Sequence[str]
     positions: Sequence[str]
     readings: Sequence[str]
     inflections: Sequence[str]
@@ -53,6 +54,7 @@ class MerriamWebsterPage(EntryFacts):
     def excerpt(self, headword: str, summary: str) -> str:
         entries = (
             MerriamWebsterEntry(
+                headwords=record.get("word", []),
                 positions=record.get("pos", []),
                 readings=record.get("pronunciation", []),
                 inflections=record.get("form", []),
@@ -144,6 +146,7 @@ def _collegiate_entries(
             continue
         pos = _text(entry.get("fl"))
         yield MerriamWebsterEntry(
+            headwords=[spelling],
             positions=[pos] if pos else [],
             readings=[
                 reading for pron in _objects(head.get("prs")) if (reading := _text(pron.get("mw")))
@@ -155,6 +158,7 @@ def _collegiate_entries(
 
 def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: str = "") -> str:
     forms_by_pos: dict[str, list[str]] = {}
+    headwords_by_pos: dict[str, list[str]] = {}
     indexed_by_pos: dict[str, list[str]] = {}
     unassigned_forms: list[str] = []
     readings: list[str] = []
@@ -165,6 +169,12 @@ def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: s
         if len(positions) == 1:
             position = positions[0]
             forms_by_pos[position].extend(entry.inflections)
+            if position in {"adjective", "abbreviation"}:
+                headwords_by_pos.setdefault(position, []).extend(
+                    f"原形 {headword}"
+                    for headword in entry.headwords
+                    if headword.casefold() == word.casefold()
+                )
             if entry.indexed_inflections:
                 indexed_by_pos.setdefault(position, []).extend(entry.indexed_inflections)
         else:
@@ -177,7 +187,8 @@ def _entry_excerpt(word: str, entries: Iterable[MerriamWebsterEntry], summary: s
     if readings:
         parts.append("读音标记 " + "、".join(list(dict.fromkeys(readings))[:3]))
     for position, inflections in forms_by_pos.items():
-        parts.append(f"词形 {position} [" + "、".join(dict.fromkeys(inflections)) + "]")
+        displayed = inflections or headwords_by_pos.get(position, [])
+        parts.append(f"词形 {position} [" + "、".join(dict.fromkeys(displayed)) + "]")
     if unassigned_forms:
         parts.append("[ " + "、".join(dict.fromkeys(unassigned_forms)) + " ]")
     for position, candidates in indexed_by_pos.items():

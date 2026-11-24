@@ -75,6 +75,7 @@ async def test_concurrent_replay_and_invalid_sense_do_not_duplicate_calls(
 
 async def test_dictionary_source_status_from_actual_responses():
     def reply(req):
+        assert not req.url.host.endswith(".youdao.com")
         if req.url.path == "/robots.txt":
             return httpx.Response(
                 200,
@@ -92,8 +93,25 @@ async def test_dictionary_source_status_from_actual_responses():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
         sources = await search_dictionaries("tomorrow", None, client)
-    assert [s.status for s in sources] == ["no_match", "unavailable", "no_match", "found"]
+    assert [s.status for s in sources] == ["not_configured", "unavailable", "no_match", "found"]
+    assert sources[0].locator == "https://dict.youdao.com/w/eng/tomorrow/"
     assert sources[-1].excerpt == "Tomorrow: the next day."
+
+
+async def test_dictionary_source_with_overlong_encoded_locator_stays_isolated():
+    seen = []
+
+    def reply(req):
+        seen.append(req.url.host)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        sources = await search_dictionaries("词" * 200, None, client, youdao_public_lookup=True)
+
+    assert sources[0].status == "unavailable"
+    assert sources[0].locator == ""
+    assert "dict.youdao.com" not in seen
+    assert len(sources) == 4
 
 
 async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(caplog):
@@ -153,12 +171,56 @@ async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(
     )
     assert {url.host for url in requests} == {
         "www.dictionaryapi.com",
-        "www.youdao.com",
         "www.oxfordlearnersdictionaries.com",
         "dictionary.cambridge.org",
     }
     assert "www.dictionaryapi.com" in caplog.text
     assert key not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("word", "entries", "expected"),
+    [
+        (
+            "test",
+            [
+                {"hwi": {"hw": "test"}, "fl": "adjective"},
+                {"hwi": {"hw": "Test"}, "fl": "abbreviation"},
+            ],
+            "test · 词性 adjective、abbreviation · 词形 adjective [原形 test]"
+            " · 词形 abbreviation [原形 Test]",
+        ),
+        (
+            "good",
+            [
+                {"hwi": {"hw": "good"}, "fl": "adjective"},
+                {
+                    "hwi": {"hw": "good"},
+                    "fl": "adjective",
+                    "ins": [{"if": "bet*ter"}, {"if": "best"}],
+                },
+            ],
+            "good · 词性 adjective · 词形 adjective [better、best]",
+        ),
+    ],
+)
+async def test_webster_preserves_original_headword_for_adjective_and_abbreviation(
+    word, entries, expected
+):
+    def reply(req):
+        if req.url.host != "www.dictionaryapi.com":
+            return httpx.Response(404)
+        assert req.url.path == f"/api/v3/references/collegiate/json/{word}"
+        return httpx.Response(200, json=entries)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        sources = await search_dictionaries(
+            word, None, client, merriam_webster_api_key=SecretStr("test-only")
+        )
+
+    source = next(row for row in sources if row.source == "Merriam-Webster")
+    assert source.status == "found"
+    assert source.excerpt == expected
 
 
 @pytest.mark.parametrize(
@@ -239,6 +301,7 @@ async def test_search_provider_falls_back_after_live_lookup_and_filters_domains(
     indexed_hosts = []
 
     def reply(req):
+        assert not req.url.host.endswith(".youdao.com")
         if req.url.path == "/robots.txt":
             return httpx.Response(200, text="User-agent: *\nAllow: /")
         if req.url.host == "dictionary.cambridge.org":
@@ -272,6 +335,7 @@ async def test_search_provider_falls_back_after_live_lookup_and_filters_domains(
     async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
         materials = await search_dictionaries("tomorrow", SecretStr("local-test"), client)
     assert len(indexed_hosts) == 3
+    assert "dict.youdao.com" in indexed_hosts
     assert "dictionary.cambridge.org" not in indexed_hosts
     assert materials[-1].excerpt == "Tomorrow from the live dictionary."
     assert all(
@@ -283,7 +347,7 @@ async def test_search_provider_falls_back_after_live_lookup_and_filters_domains(
 @pytest.mark.parametrize(
     ("headword", "rules", "expected"),
     [
-        ("center", "Allow: /", "found"),
+        ("test", "Allow: /", "found"),
         ("unrelated", "Allow: /", "unavailable"),
         ("center", "Disallow: /w/", "unavailable"),
     ],
@@ -302,12 +366,14 @@ async def test_youdao_uses_public_dictionary_rules_and_basic_entry(headword, rul
             headers={"Content-Type": "text/html"},
             text="""<meta name="description" content="General company description">
                 <div id="phrsListTab">
-                  <h2><span class="keyword">center</span>
-                    <div><span class="pronounce">英 <span>[ˈsentə]</span></span>
-                    <span class="pronounce">美 <span>[ˈsentər]</span></span></div>
+                  <h2><span class="keyword">test</span>
+                    <div><span class="pronounce">美<span>[test]</span></span>
+                    <span class="pronounce">英 <span>[test]</span></span></div>
                   </h2>
-                  <div><ul><li>n. Sample text</li><li>v. Sample text</li></ul>
-                  <p class="additional">[复数 centers]</p></div>
+                  <ul><li>adj. Unrelated list outside the definitions</li></ul>
+                  <div class="trans-container"><ul><li>n. Sample text</li><li>v. Sample text</li></ul>
+                  <p class="additional">[ 复数 tests 第三人称单数 tests 现在分词 testing
+                    过去式 tested 过去分词 tested ]</p></div>
                 </div>
                 <span class="pronounce">美 [wrong]</span>""",
         )
@@ -321,10 +387,72 @@ async def test_youdao_uses_public_dictionary_rules_and_basic_entry(headword, rul
     assert entry_requests == ([] if rules.startswith("Disallow") else [f"/w/eng/{headword}/"])
     if expected == "found":
         assert (
-            source.excerpt == "center · 英 [ˈsentə] / 美 [ˈsentər] · 词性 n.、v. · [复数 centers]"
+            source.excerpt == "test · 英 [test] / 美 [test] · 词性 n.、v."
+            " · [复数 tests 第三人称单数 tests 现在分词 testing 过去式 tested 过去分词 tested]"
         )
     else:
         assert source.excerpt == ""
+
+
+@pytest.mark.parametrize(
+    ("robots", "responses", "status", "entry_requests"),
+    [
+        ([503, 200], [502, 200], "found", 2),
+        ([200], ["connect-error", 200], "found", 2),
+        ([200], [503, 503], "unavailable", 2),
+        ([200], ["retry-after"], "unavailable", 1),
+        ([200], [429], "unavailable", 1),
+        ([200], [403], "unavailable", 1),
+        ([200], [404], "no_match", 1),
+        ([200], [302], "unavailable", 1),
+        ([302], [], "unavailable", 0),
+        (["html"], [], "unavailable", 0),
+    ],
+)
+async def test_youdao_retries_transient_errors_without_overriding_site_controls(
+    robots, responses, status, entry_requests
+):
+    requested = []
+    rules, entries = iter(robots), iter(responses)
+
+    def respond(req):
+        assert req.url.host != "redirect.test"
+        if req.url.host != "dict.youdao.com":
+            return httpx.Response(404)
+        requested.append(req.url.path)
+        if req.url.path == "/robots.txt":
+            code = next(rules)
+            if code == "html":
+                return httpx.Response(200, headers={"Content-Type": "text/html"}, text="<html/>")
+            if code == 200:
+                return httpx.Response(200, text="User-agent: *\nAllow: /")
+        else:
+            assert req.url.raw_path == b"/w/eng/take%20off/"
+            code = next(entries)
+            if code == "connect-error":
+                raise httpx.ConnectError("connection failed", request=req)
+            if code == "retry-after":
+                return httpx.Response(503, headers={"Retry-After": "30"})
+            if code == 200:
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "text/html"},
+                    text='<div id="phrsListTab"><span class="keyword">take off</span>'
+                    '<span class="pronounce">英 [teɪk ɒf]</span></div>',
+                )
+        return httpx.Response(
+            code, headers={"Location": "https://redirect.test/"} if code == 302 else None
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=True
+    ) as client:
+        sources = await search_dictionaries("take off", None, client, youdao_public_lookup=True)
+
+    source = sources[0]
+    assert source.status == status
+    assert source.excerpt == ("take off · 英 [teɪk ɒf]" if status == "found" else "")
+    assert requested == ["/robots.txt"] * len(robots) + ["/w/eng/take off/"] * entry_requests
 
 
 @pytest.mark.parametrize(
@@ -536,6 +664,130 @@ async def test_live_entries_follow_only_verified_related_lexemes(form_lemma):
     assert not any(host == "example.org" for host, _ in requested)
 
 
+@pytest.mark.parametrize("lemma", ["test", "test-drive"])
+async def test_cambridge_checks_regular_past_forms_against_the_dictionary(lemma):
+    host = "dictionary.cambridge.org"
+    pages = {
+        "/dictionary/english/test": """
+            <div class="entry-body__el"><div class="dpos-h">
+                <span class="dhw">test</span><span class="dpos">verb</span>
+            </div></div>
+        """,
+        "/dictionary/english/testing": """
+            <meta name="description" content="TESTING definition: 1. difficult: 2. the act of giving tests">
+        """,
+        "/dictionary/english/tested": (
+            '<meta name="description" content="TESTED definition: 1. past simple and past '
+            f'participle of {lemma} 2. to put something through a process">'
+        ),
+    }
+    requested = []
+
+    def respond(req):
+        if req.url.host != host:
+            return httpx.Response(404)
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        requested.append(req.url.path)
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[req.url.path])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        sources = await search_dictionaries("test", None, client)
+
+    source = next(s for s in sources if s.source == "Cambridge Dictionary")
+    assert source.status == "found"
+    assert set(requested) == set(pages)
+    expected = "test · 词性 verb"
+    if lemma == "test":
+        expected += " · 词形 verb [过去式 tested、过去分词 tested]"
+    assert source.excerpt == expected
+
+
+@pytest.mark.parametrize(
+    ("noun_example", "confirmed"),
+    [
+        ("The doctors have done some <b>tests</b>.", True),
+        ("Some tests-based reports arrived.", False),
+        ("The test was easy.", False),
+    ],
+)
+def test_cambridge_confirms_a_regular_plural_in_the_matching_noun_examples(noun_example, confirmed):
+    entry = CambridgeEntry("test")
+    entry.feed(f"""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">test</span><span class="dpos">noun</span>
+            </div>
+            <div class="dexamp"><span class="deg">{noun_example}</span></div>
+        </div>
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">test</span><span class="dpos">verb</span>
+            </div>
+            <div class="dexamp"><span class="deg">I prepared some tests.</span></div>
+        </div>
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">exam</span><span class="dpos">noun</span>
+            </div>
+            <div class="dexamp"><span class="deg">I prepared some tests.</span></div>
+        </div>
+    """)
+    expected = "test · 词性 noun、verb"
+    if confirmed:
+        expected += " · 词形 noun [复数 tests]"
+    assert entry.excerpt("test", "") == expected
+
+
+@pytest.mark.parametrize(
+    ("examples", "expected"),
+    [
+        (
+            [
+                "The manufacturers are currently <b>testing</b> the new engine.",
+                "This <a>exercise</a> tests your reflexes.",
+            ],
+            " · 词形 verb [现在分词 testing、第三人称单数 tests]",
+        ),
+        (
+            [
+                "This includes tests for reflexes.",
+                "There are tests for reflexes.",
+                "She is evaluating testing procedures.",
+                "This exercise tests-based chart was updated.",
+            ],
+            "",
+        ),
+    ],
+)
+def test_cambridge_confirms_verb_forms_in_the_matching_verb_examples(examples, expected):
+    entry = CambridgeEntry("test")
+    verb_examples = "".join(
+        f'<div class="dexamp"><span class="deg">{example}</span></div>' for example in examples
+    )
+    entry.feed(f"""
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">test</span><span class="dpos">noun</span>
+            </div>
+            <div class="dexamp"><span class="deg">This exercise tests your reflexes.</span></div>
+        </div>
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">test</span><span class="dpos">verb</span>
+            </div>
+            {verb_examples}
+        </div>
+        <div class="entry-body__el">
+            <div class="dpos-h">
+                <span class="dhw">check</span><span class="dpos">verb</span>
+            </div>
+            <div class="dexamp"><span class="deg">They are testing the engine.</span></div>
+        </div>
+    """)
+    assert entry.excerpt("test", "") == "test · 词性 noun、verb" + expected
+
+
 def test_cambridge_keeps_grammar_labels_and_excludes_the_forms_ipa_from_headword():
     entry = CambridgeEntry("run")
     entry.feed("""
@@ -559,4 +811,4 @@ def test_cambridge_keeps_grammar_labels_and_excludes_the_forms_ipa_from_headword
     assert entry.excerpt("run", "") == (
         "run · 美 [rʌn] · 词性 verb · 词形 verb [现在分词 running、过去式 ran、过去分词 run]"
     )
-    assert entry.participle_candidate(None) is None
+    assert entry.verb_form_candidates(None) == ("run", [])

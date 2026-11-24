@@ -137,7 +137,9 @@ uv run python -m tsz_agent.auth login chatgpt --ssh-host tshb-test --cancel-hand
 
 显式执行 `uv run alembic upgrade head` 后启动 API。设置 `TSZ_AGENT_SUPERVISOR_ENABLED=true` 并提供 `DEEPSEEK_API_KEY`，Rust 通过现有服务凭据查询 `GET /v2/lexicon/capability`。有道、牛津、韦氏和剑桥各有独立的实时查询与正文解析代码。网页查询未取得资料时，可设置 `TSZ_AGENT_DICTIONARY_SEARCH_KEY` 从 Brave Search 获取摘要。模型地址默认 DeepSeek，隔离验收可将 `TSZ_AGENT_SUPERVISOR_MODEL_URL` 指向本机兼容服务并使用专属模拟凭据。运行数据归 Agent 独立数据库。
 
-有道的公开词典参考可通过 `TSZ_AGENT_YOUDAO_PUBLIC_LOOKUP_ENABLED=true` 启用，适用于本地非商业预览或已取得相应授权的环境。此入口遵循 `dict.youdao.com` 的 robots 规则，提取词性、音标和词形。牛津和剑桥从各自主词条提取词性及英美音标；韦氏的读音标记以原站记法展示，并保留词条列出的变形。站点拒绝访问时记录该来源的访问状态。正式商业使用应确认[有道词典服务条款](https://c.youdao.com/dict/law/youdao_dict_service.html)对应的授权。
+取得自动访问授权后，可在 Agent 环境中设置 `TSZ_AGENT_YOUDAO_PUBLIC_LOOKUP_ENABLED=true`。此入口遵循 `dict.youdao.com` 的 robots 规则，从公开词条提取词性、英美音标和词形。关闭直查且未取得搜索摘要时，有道显示「未配置」。直查遇到拒绝访问或限流时，Agent 停止直查并记录来源状态。[有道词典服务条款](https://c.youdao.com/dict/law/youdao_dict_service.html)
+
+牛津和剑桥从各自主词条提取词性及英美音标。剑桥优先读取主词条列出的词形，并从独立词形页补充有明确词头对应关系的动词变形。韦氏的读音标记以原站记法展示，并保留词条列出的变形。站点拒绝访问时记录该来源的访问状态。
 
 取得韦氏对本应用自动查询和使用返回资料的授权后，在 Agent 的私有配置中设置 `TSZ_AGENT_MERRIAM_WEBSTER_API_KEY` 并重启 API。韦氏随后改用官方 Collegiate API，只取匹配词条的词性、原站读音标记及词条列出的变形。未配置时沿用网页查询。API 失效或限流会显示该来源不可用。授权与品牌展示要求见[韦氏 API 条款](https://dictionaryapi.com/info/terms-of-service)及[官方 FAQ](https://dictionaryapi.com/info/frequently-asked-questions)。
 
