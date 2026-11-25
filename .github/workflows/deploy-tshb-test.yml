@@ -69,9 +69,31 @@ jobs:
             --label "org.opencontainers.image.revision=$CI_SHA" \
             --tag "tsz-agent:sha-$CI_SHA" .
           bash deploy/smoke-image.sh "tsz-agent:sha-$CI_SHA"
+      - name: Prepare the verified image archive
+        if: steps.candidate.outputs.current == 'true'
+        id: archive
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/image.tar.gz"
+          docker save "tsz-agent:sha-$CI_SHA" | gzip -1 > "$archive"
+          printf 'bytes=%s\n' "$(stat -c %s "$archive")" >> "$GITHUB_OUTPUT"
+          printf 'sha256=%s\n' "$(sha256sum "$archive" | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Upload the verified image archive
+        if: steps.candidate.outputs.current == 'true'
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: agent-image-${{ github.event.workflow_run.head_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/image.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
       - name: Deploy the verified image
         if: steps.candidate.outputs.current == 'true'
         env:
+          IMAGE_ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          IMAGE_ARCHIVE_BYTES: ${{ steps.archive.outputs.bytes }}
+          IMAGE_ARCHIVE_SHA256: ${{ steps.archive.outputs.sha256 }}
           DEPLOY_HOST: ${{ secrets.TSHB_TEST_SSH_HOST }}
           DEPLOY_USER: ${{ secrets.TSHB_TEST_SSH_USER }}
           DEPLOY_KEY: ${{ secrets.TSHB_TEST_SSH_KEY }}

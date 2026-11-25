@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs on Actions. Transfer only the verified image and the release entry points.
+# Runs on Actions. The server pulls the image; SSH carries the release entry points.
 set -euo pipefail
 umask 077
 DEPLOY_ROOT=${DEPLOY_ROOT%/}
@@ -9,6 +9,7 @@ compose_files=${DEPLOY_COMPOSE_FILES:--}
 [[ "$DEPLOY_ROOT" =~ ^/[a-zA-Z0-9._/-]+$ && "$DEPLOY_ROOT" != */../* && "$DEPLOY_ROOT" != */.. ]]
 [[ "$DEPLOY_PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ && "$DEPLOY_DATABASE" =~ ^[a-zA-Z0-9_]+$ ]]
 [[ -n "$DEPLOY_KEY" && -n "$DEPLOY_KNOWN_HOSTS" ]]
+[[ "$IMAGE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$IMAGE_ARCHIVE_BYTES" =~ ^[1-9][0-9]*$   && "$IMAGE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$compose_files" == "-" || "$compose_files" =~ ^/[a-zA-Z0-9._/-]+(,/[a-zA-Z0-9._/-]+)*$ ]]
 
 root=$(cd "$(dirname "$0")" && pwd -P)
@@ -22,14 +23,14 @@ cleanup() {
   if [[ -n "$remote_stage" ]]; then
     if [[ "$started" == false ]]; then
       ssh -F "$config" agent-tshb-test \
-        "for f in '$remote_stage'/image.tar.gz '$remote_stage'/publish.sh '$remote_stage'/probe.py; do if test -f \"\$f\"; then unlink \"\$f\" || exit 1; fi; done; rmdir '$remote_stage'" \
+        "for f in '$remote_stage'/image.tar.gz '$remote_stage'/publish.sh '$remote_stage'/probe.py '$remote_stage'/artifact.py; do if test -f \"\$f\"; then unlink \"\$f\" || exit 1; fi; done; rmdir '$remote_stage'" \
         || result=1
     elif (( result == 255 )); then
       printf 'SSH was interrupted. Check the recorded host state and stage at %s before retrying.\n' "$remote_stage" >&2
     fi
   fi
   local file
-  for file in key known_hosts image.tar.gz ssh.conf; do
+  for file in key known_hosts ssh.conf; do
     if [[ -f "$temp/$file" ]]; then unlink "$temp/$file" || result=1; fi
   done
   rmdir "$temp" || result=1
@@ -64,27 +65,26 @@ obsolete() {
   fi
 }
 
-image="tsz-agent:sha-$CI_SHA"
-docker save "$image" | gzip -1 > "$temp/image.tar.gz"
-digest=$(sha256sum "$temp/image.tar.gz" | cut -d ' ' -f1)
 if obsolete; then exit 0; fi
 
 staged=$(ssh -F "$config" agent-tshb-test \
   "umask 077; mkdir -p '$DEPLOY_ROOT/.agent-cd' && mktemp -d '$DEPLOY_ROOT/.agent-cd/incoming.XXXXXXXX'")
 [[ "$staged" == "$DEPLOY_ROOT/.agent-cd/incoming."* && "$staged" =~ ^/[a-zA-Z0-9._/-]+$ ]]
 remote_stage=$staged
-scp -F "$config" -q "$temp/image.tar.gz" "$root/publish.sh" "$root/probe.py" "agent-tshb-test:$remote_stage/"
+scp -F "$config" -q "$root/publish.sh" "$root/probe.py" "$root/artifact.py" "agent-tshb-test:$remote_stage/"
+python3 "$root/artifact.py" locate "$IMAGE_ARTIFACT_ID" "$GITHUB_RUN_ID" "$IMAGE_ARCHIVE_BYTES" \
+  | ssh -F "$config" agent-tshb-test python3 "$remote_stage/artifact.py" download "$remote_stage" "$IMAGE_ARCHIVE_BYTES"
 if obsolete; then exit 0; fi
 
 started=true
 ssh -F "$config" agent-tshb-test bash -s -- "$remote_stage" "$DEPLOY_ROOT" "$DEPLOY_PROJECT" \
-  "$DEPLOY_DATABASE" "$CI_SHA" "$CI_RUN_ID" "$CI_RUN_NUMBER" "$CI_ATTEMPT" "$digest" "$compose_files" <<'REMOTE'
+  "$DEPLOY_DATABASE" "$CI_SHA" "$CI_RUN_ID" "$CI_RUN_NUMBER" "$CI_ATTEMPT" "$IMAGE_ARCHIVE_SHA256" "$compose_files" <<'REMOTE'
 set -euo pipefail
 stage=$1
 shift
 cleanup_stage() {
   result=$?
-  for file in image.tar.gz publish.sh probe.py; do
+  for file in image.tar.gz publish.sh probe.py artifact.py; do
     test ! -f "$stage/$file" || unlink "$stage/$file" || result=1
   done
   rmdir "$stage" || result=1
