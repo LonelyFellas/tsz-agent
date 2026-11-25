@@ -1033,6 +1033,19 @@
             "minLength": 1,
             "title": "Pos",
             "type": "string"
+          },
+          "sub_pos": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sub Pos"
           }
         },
         "required": [
@@ -1040,6 +1053,36 @@
           "pattern"
         ],
         "title": "Grammar",
+        "type": "object"
+      },
+      "GrammarSubPosOption": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "name_en": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name En",
+            "type": "string"
+          },
+          "name_zh": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name Zh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name_zh",
+          "name_en"
+        ],
+        "title": "GrammarSubPosOption",
         "type": "object"
       },
       "Group": {
@@ -2629,6 +2672,21 @@
             "maxItems": 60,
             "title": "Existing Pos",
             "type": "array"
+          },
+          "grammar_sub_pos": {
+            "additionalProperties": {
+              "items": {
+                "$ref": "#/components/schemas/GrammarSubPosOption"
+              },
+              "type": "array"
+            },
+            "maxProperties": 60,
+            "propertyNames": {
+              "maxLength": 100,
+              "minLength": 1
+            },
+            "title": "Grammar Sub Pos",
+            "type": "object"
           },
           "headword": {
             "maxLength": 200,

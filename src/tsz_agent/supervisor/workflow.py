@@ -43,22 +43,35 @@ async def infer(
         " 资料不足可返回空数组；绝不虚构引用或声称已保存。\n"
         + json.dumps(agent.row.model_json_schema(), ensure_ascii=False)
     )
+    entry_pos = list(
+        dict.fromkeys([*scope.existing_pos, *[form.pos for form in view.proposals.forms]])
+    )
     context = {
         "headword": scope.headword,
         "target": scope.target,
         "medium": scope.medium,
         "catalog": scope.catalog,
-        "existing_senses": [s.model_dump() for s in sense_list(scope, view.proposals)],
+        "existing_senses": [
+            {"sense": index, **sense.model_dump()}
+            for index, sense in enumerate(sense_list(scope, view.proposals))
+        ],
         "examples": [*scope.examples, *[e.text for e in view.proposals.examples]],
-        "entry_pos": list(
-            dict.fromkeys([*scope.existing_pos, *[f.pos for f in view.proposals.forms]])
-        ),
+        "entry_pos": entry_pos,
         "sources": [s.model_dump() for s in view.sources if s.status == "found"],
     }
+    if section == "grammar":
+        context["grammar_sub_pos"] = {
+            pos: [option.model_dump() for option in scope.grammar_sub_pos.get(pos, [])]
+            for pos in entry_pos
+        }
     return await gateway.complete(settings, instruction, context)
 
 
-async def lookup(store: Store, settings: Settings, body: Input) -> candidates.CandidateLookup:
+async def lookup(
+    store: Store, settings: Settings, body: Input, *, section_candidates: bool = False
+) -> candidates.CandidateLookup:
+    if not section_candidates and body.scope.sections not in (["forms"], ["grammar"]):
+        return candidates.CandidateLookup(candidate=None)
     async with store.sessions() as db:
         return candidates.CandidateLookup(candidate=await candidates.current(db, settings, body))
 
@@ -69,10 +82,14 @@ async def advance(
     body: Input,
     *,
     force_refresh: bool = False,
+    section_candidates: bool = False,
     disconnected: Callable[[], bool] | None = None,
 ) -> View:
     scope = body.scope
-    eligible = candidates.candidate_context(settings, body) is not None
+    extended_run = scope.sections not in (["forms"], ["grammar"])
+    eligible = (not extended_run or section_candidates) and (
+        candidates.candidate_context(settings, body) is not None
+    )
 
     async def reuse(
         db: AsyncSession,
@@ -85,6 +102,8 @@ async def advance(
         }
 
     fingerprint_input = scope.model_dump(mode="json")
+    if extended_run and eligible:
+        fingerprint_input["section_candidates"] = True
     if force_refresh:
         fingerprint_input["force_refresh"] = True
     initial = View(

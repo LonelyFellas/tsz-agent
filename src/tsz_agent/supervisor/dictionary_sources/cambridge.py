@@ -1,6 +1,8 @@
 import re
 from urllib.parse import quote
 
+import httpx
+
 from ..entry_facts import (
     EXAMPLE_PLURAL_CONTEXT,
     Element,
@@ -13,6 +15,8 @@ from ..entry_facts import (
 from .source import DictionarySource
 
 HOST = "dictionary.cambridge.org"
+ENTRY_PATH = "/dictionary/english/"
+_ENTRY_SLUG = re.compile(r"/dictionary/english/[\w'-]+")
 INFLECTION_LABELS = (
     ("past tense and past participle", ("过去式", "过去分词")),
     ("past simple and past participle", ("过去式", "过去分词")),
@@ -28,6 +32,16 @@ INFLECTION_LABELS = (
 )
 FORM_LABELS = {label for _, labels in INFLECTION_LABELS for label in labels}
 VERB_LABELS = {"现在分词", "过去式", "过去分词"}
+
+
+def valid_redirect(url: httpx.URL) -> bool:
+    return (
+        url.scheme == "https"
+        and url.host == HOST
+        and url.port is None
+        and not (url.userinfo or url.query or url.fragment)
+        and _ENTRY_SLUG.fullmatch(url.path) is not None
+    )
 
 
 def regular_ing_form(word: str) -> str:
@@ -89,6 +103,8 @@ def field(
         return "word"
     if tag == "span" and "dpos" in classes and any("dpos-h" in parent.classes for parent in stack):
         return "pos"
+    if "dgc" in classes and any("dgram" in parent.classes for parent in stack):
+        return "grammar_pattern"
     if (
         "deg" in classes
         and record.get("pos") in (["noun"], ["verb"])
@@ -255,8 +271,9 @@ class CambridgeEntry(EntryFacts):
 SOURCE = DictionarySource(
     "Cambridge Dictionary",
     HOST,
-    lambda word: f"https://{HOST}/dictionary/english/{quote(word, safe='')}",
+    lambda word: f"https://{HOST}{ENTRY_PATH}{quote(word, safe='')}",
     reader=CambridgeEntry,
+    valid_redirect=valid_redirect,
     # Long entries can put explicitly labeled forms in a later dictionary section.
     max_page_chars=600_000,
 )

@@ -9,7 +9,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import SecretStr
 
-from ..entry_facts import Element, EntryFacts, EntryMarkup, Field
+from ..entry_facts import Element, EntryFacts, EntryMarkup, Field, append_grammar_evidence
 from ..lexicon import Material
 from .source import DictionarySource
 
@@ -244,6 +244,34 @@ def _entry_excerpt(
     return excerpt[:MAX_EXCERPT_LENGTH]
 
 
+def _verbal_illustrations(node: object) -> Iterator[str]:
+    if isinstance(node, list):
+        if len(node) == 2 and node[0] == "vis":
+            for example in _objects(node[1]):
+                yield re.sub(r"\{[^{}]*\}", "", _text(example.get("t")))
+        else:
+            for child in node:
+                yield from _verbal_illustrations(child)
+    elif isinstance(node, dict):
+        for child in node.values():
+            yield from _verbal_illustrations(child)
+
+
+def _collegiate_examples(entries: list[dict[str, object]], word: str) -> Iterator[str]:
+    phrase_definitions: list[object] = []
+    word_definitions: list[object] = []
+    for entry in entries:
+        head = entry.get("hwi")
+        if not isinstance(head, dict):
+            continue
+        spelling = _text(head.get("hw")).replace("*", "").casefold()
+        if spelling.startswith(word.casefold() + " "):
+            phrase_definitions.append(entry.get("def"))
+        elif spelling == word.casefold():
+            word_definitions.append(entry.get("def"))
+    return _verbal_illustrations(phrase_definitions + word_definitions)
+
+
 async def _fetch_collegiate(client: httpx.AsyncClient, word: str, key: SecretStr) -> object:
     async with client.stream(
         "GET",
@@ -276,7 +304,11 @@ async def lookup_collegiate(
                 item.status = "no_match"
                 return item
             entries = _objects(result)
-            excerpt = _entry_excerpt(word, _collegiate_entries(entries, word))
+            excerpt = append_grammar_evidence(
+                _entry_excerpt(word, _collegiate_entries(entries, word)),
+                word,
+                examples=_collegiate_examples(entries, word),
+            )
             if not excerpt and (target := _british_spelling_target(entries, word)):
                 related = _objects(await _fetch_collegiate(client, target, key))
                 excerpt = _entry_excerpt(

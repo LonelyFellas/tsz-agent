@@ -10,6 +10,8 @@ from tsz_agent.supervisor.runtime import AdmissionLimit
 
 from .problems import Problem
 
+SECTION_CANDIDATES_HEADER = "x-tsz-next-section-candidates"
+
 
 def build_router(settings: Settings, store: Store) -> APIRouter:
     router = APIRouter(prefix="/v2")
@@ -19,7 +21,13 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
 
     @router.get("/lexicon/capability")
     async def supervisor_capability() -> dict[str, bool]:
-        return {"generation": enabled(), "generation_candidates": enabled()}
+        active = enabled()
+        return {
+            "generation": active,
+            "generation_candidates": active,
+            "grammar_sub_pos": active,
+            "section_generation_candidates": active,
+        }
 
     async def execute(
         request: Request, body: lexicon.Input, *, refresh: bool = False
@@ -37,7 +45,12 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
         watcher = asyncio.create_task(watch_disconnect())
         try:
             return await workflow.advance(
-                store, settings, body, force_refresh=refresh, disconnected=disconnected.is_set
+                store,
+                settings,
+                body,
+                force_refresh=refresh,
+                section_candidates=request.headers.get(SECTION_CANDIDATES_HEADER) == "v1",
+                disconnected=disconnected.is_set,
             )
         except AdmissionLimit as exc:
             raise Problem(429, "run_limit") from exc
@@ -55,9 +68,16 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
         return await execute(request, body, refresh=True)
 
     @router.post("/lexicon/candidates")
-    async def lexicon_candidates(body: lexicon.Input) -> candidates.CandidateLookup:
+    async def lexicon_candidates(
+        request: Request, body: lexicon.Input
+    ) -> candidates.CandidateLookup:
         if not enabled():
             raise Problem(503, "generation_unavailable")
-        return await workflow.lookup(store, settings, body)
+        return await workflow.lookup(
+            store,
+            settings,
+            body,
+            section_candidates=request.headers.get(SECTION_CANDIDATES_HEADER) == "v1",
+        )
 
     return router

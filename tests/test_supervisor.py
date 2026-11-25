@@ -14,7 +14,15 @@ from tsz_agent.supervisor import workflow as runtime
 from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
 from tsz_agent.supervisor.dictionary_sources.youdao import YoudaoSummary
-from tsz_agent.supervisor.lexicon import Input, Material, Scope, SenseContext
+from tsz_agent.supervisor.lexicon import (
+    GrammarSubPosOption,
+    Input,
+    Material,
+    Proposals,
+    Scope,
+    SenseContext,
+    validate_rows,
+)
 from tsz_agent.supervisor.runtime import SupervisorRun
 from tsz_agent.supervisor.tools import search_dictionaries
 
@@ -38,6 +46,25 @@ def request(sections):
         ),
         materials=[],
     )
+
+
+def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
+    scope = request(["grammar"]).scope
+    scope.grammar_sub_pos = {
+        "noun": [GrammarSubPosOption(code="N-COUNT", name_zh="可数名词", name_en="countable noun")],
+        "verb": [
+            GrammarSubPosOption(code="V-I", name_zh="不及物动词", name_en="intransitive verb")
+        ],
+    }
+    valid = {"pos": "noun", "pattern": "a tomorrow", "sub_pos": "N-COUNT"}
+    wrong_pos = {"pos": "noun", "pattern": "the tomorrow", "sub_pos": "V-I"}
+    without_recommendation = {"pos": "noun", "pattern": "tomorrow"}
+    assert validate_rows(
+        "grammar", {"items": [valid, wrong_pos, without_recommendation]}, scope, Proposals()
+    ) == [valid, {"pos": "noun", "pattern": "the tomorrow"}, without_recommendation]
+    assert validate_rows(
+        "grammar", {"items": [valid]}, request(["grammar"]).scope, Proposals()
+    ) == [{"pos": "noun", "pattern": "a tomorrow"}]
 
 
 async def test_concurrent_replay_and_invalid_sense_do_not_duplicate_calls(
@@ -86,7 +113,7 @@ def new_run(body, **scope_changes):
     )
 
 
-@pytest.mark.parametrize("section", ["forms", "grammar"])
+@pytest.mark.parametrize("section", ["forms", "grammar", "groups"])
 async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
     store, settings, monkeypatch, section
 ):
@@ -99,6 +126,8 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
         }
     )
     body = request([section])
+    if section == "groups":
+        body.scope.senses = [SenseContext(pos="noun", gloss="明天")]
     body.materials = [
         Material(source="智能词库", locator="entry@published-1", excerpt="明天", status="found")
     ]
@@ -123,6 +152,8 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
         model_calls.append(context["target"])
         if section == "grammar":
             items = [{"pos": "noun", "pattern": "by tomorrow"}]
+        elif section == "groups":
+            items = [{"sense": 0, "name_zh": "未来时间", "name_en": "future time"}]
         else:
             variant = {"spelling": "tomorrow", "dict_phonetic": "təˈmɒrəʊ"}
             items = [
@@ -138,13 +169,14 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
     monkeypatch.setattr(runtime, "search_dictionaries", dictionary_client)
     monkeypatch.setattr(runtime.gateway, "complete", model)
     auth = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
+    opted_in = {**auth, "x-tsz-next-section-candidates": "v1"} if section == "groups" else auth
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(create_app(settings, store)), base_url="http://agent.test"
     ) as client:
 
-        async def send(operation, payload):
+        async def send(operation, payload, headers=opted_in):
             response = await client.post(
-                f"/v2/lexicon/{operation}", headers=auth, json=payload.model_dump(mode="json")
+                f"/v2/lexicon/{operation}", headers=headers, json=payload.model_dump(mode="json")
             )
             assert response.status_code == 200, response.text
             return response.json()
@@ -165,6 +197,8 @@ async def test_lookup_and_new_run_reuse_without_dictionary_http_or_model(
         assert read["result"]["base_revision"] == 3
         assert read["result"]["snapshot_id"] == second.scope.snapshot_id
         assert read["result"]["sources"] == first["sources"]
+        if section == "groups":
+            assert await send("candidates", second, auth) == {"candidate": None}
         assert await send("advance", second) == read["result"]
         assert await send("advance", second) == read["result"]
         assert dictionary_requests == requests_after_first
@@ -209,6 +243,53 @@ def dictionary_result(name):
         excerpt="tomorrow · 词性 noun",
         status="found",
     )
+
+
+async def test_sense_directory_caches_dialect_with_senses_only_after_completion(
+    store, settings, monkeypatch
+):
+    body = request(["senses", "dialect"])
+    material = Material(
+        source="智能词库",
+        locator="entry@published-1",
+        excerpt="British usage",
+        status="found",
+    )
+    body.materials = [material]
+
+    async def search(*args, **kwargs):
+        return []
+
+    async def model(settings, scope, section, view):
+        if section == "senses":
+            return {"items": [{"pos": "noun", "gloss": "次日", "level": "A1"}]}, {}
+        return {
+            "items": [
+                {
+                    "sense": 0,
+                    "usage": "en-GB",
+                    "source_locator": material.locator,
+                    "evidence": "British usage",
+                }
+            ]
+        }, {}
+
+    monkeypatch.setattr(runtime, "infer", model)
+    monkeypatch.setattr(runtime, "search_dictionaries", search)
+    first = await runtime.advance(store, settings, body, section_candidates=True)
+    assert not first.done
+    assert (
+        await runtime.lookup(store, settings, new_run(body), section_candidates=True)
+    ).candidate is None
+    completed = await runtime.advance(store, settings, body, section_candidates=True)
+    assert completed.done
+    assert completed.proposals.dialect[0].usage == "en-GB"
+    cached = (
+        await runtime.lookup(store, settings, new_run(body), section_candidates=True)
+    ).candidate
+    assert cached is not None
+    assert cached.result.proposals == completed.proposals
+    assert [step.section for step in cached.result.steps] == ["senses", "dialect"]
 
 
 async def test_only_missing_dictionary_is_queried_and_new_evidence_invalidates_candidate(
@@ -537,6 +618,25 @@ async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(
                     "ins": [{"if": "cen*tered", "ifc": "-tered"}],
                     "def": [{"sseq": [[["sense", {"ins": [{"if": "cen*ter*ing"}]}]]]}],
                 },
+                {
+                    "hwi": {"hw": "center on"},
+                    "def": [
+                        {
+                            "sseq": [
+                                [
+                                    [
+                                        "sense",
+                                        {
+                                            "dt": [
+                                                ["vis", [{"t": "We {it}center on{/it} one issue."}]]
+                                            ]
+                                        },
+                                    ]
+                                ]
+                            ]
+                        }
+                    ],
+                },
                 {"hwi": {"hw": "cen*ter"}, "fl": "verb", "ins": [{"if": "cen*tered"}]},
                 {"hwi": {"hw": "cen*tral"}, "fl": "adjective"},
             ],
@@ -554,6 +654,7 @@ async def test_merriam_webster_collegiate_reads_exact_entry_and_redacts_api_key(
         "center · 词性 noun、verb · 读音标记 ˈsen-tər"
         " · 词形 noun [] · 词形 verb [centered、centering]"
         " · 索引词形 noun [复数 centers] · 索引词形 verb [第三人称单数 centers]"
+        " · 例句证据 We center on one issue."
     )
     assert {url.host for url in requests} == {
         "www.dictionaryapi.com",
@@ -876,9 +977,15 @@ def test_youdao_uses_matching_collins_forms_if_basic_entry_has_none(
             <h4><span class="title">{collins_head}</span>
                 <span class="additional pattern">( schooling, schooled, schools )</span>
             </h4>
+            <div class="examples"><p>They school them in safety.</p><p>中文译文。</p></div>
         </div></div>
     """)
-    assert reader.excerpt("school", "") == "school · 词性 n.、v." + expected_forms
+    expected_example = (
+        " · 例句证据 （柯林斯）They school them in safety." if collins_head == "school" else ""
+    )
+    assert (
+        reader.excerpt("school", "") == "school · 词性 n.、v." + expected_forms + expected_example
+    )
     assert reader.excerpt("schoolyard", "") == ""
 
 
@@ -1362,6 +1469,87 @@ async def test_live_entries_follow_only_verified_related_lexemes(form_lemma):
     assert (cambridge_host, "/dictionary/english/centring") in requested
     assert entries["Merriam-Webster"].status == "unavailable"
     assert not any(host == "example.org" for host, _ in requested)
+
+
+@pytest.mark.parametrize(
+    ("location", "found"),
+    [
+        ("rely-on-upon", True),
+        ("https://example.org/dictionary/english/rely-on-upon", False),
+        ("/translate/english/rely-on-upon", False),
+    ],
+)
+async def test_cambridge_follows_only_dictionary_entry_redirects(location, found):
+    host = "dictionary.cambridge.org"
+    entry = "/dictionary/english/rely"
+    canonical_entry = "/dictionary/english/rely-on-upon"
+    requests = []
+
+    def respond(req):
+        requests.append((req.url.host, req.url.path))
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if req.url.path == entry:
+            return httpx.Response(301, headers={"Location": location})
+        if req.url.path == canonical_entry:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html"},
+                text="""
+                    <div class="entry-body__el"><div class="dpos-h">
+                        <span class="dhw">rely</span><span class="dpos">verb</span>
+                        <span class="dgram">[ <span class="dgc">+ to infinitive</span> ]</span>
+                    </div></div>
+                """,
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        (source,) = await search_dictionaries(
+            "rely", None, client, source_names=("Cambridge Dictionary",)
+        )
+
+    if found:
+        assert source.status == "found"
+        assert source.locator == f"https://{host}{canonical_entry}"
+        assert source.excerpt == "rely · 词性 verb · 句型 + to infinitive"
+        assert (host, canonical_entry) in requests
+    else:
+        assert source.status == "unavailable"
+        assert requests == [(host, "/robots.txt"), (host, entry)]
+
+
+async def test_oxford_adds_patterns_from_its_linked_phrasal_entry():
+    word_path = "/definition/english/rely"
+    phrase_path = "/definition/english/rely-on"
+    pages = {
+        word_path: f"""
+            <div id="entryContent"><h1 class="headword">rely</h1>
+                <div class="webtop"><span class="pos">verb</span></div>
+                <aside class="phrasal_verb_links">
+                    <a href="{phrase_path}#sense" title="rely on definition">rely on</a>
+                </aside>
+            </div>
+        """,
+        phrase_path: """
+            <div id="entryContent"><h1 class="headword">rely on</h1>
+                <ul class="examples"><li><span class="cf">rely on somebody for something</span></li></ul>
+            </div>
+        """,
+    }
+
+    def respond(req):
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, text=pages[req.url.path])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        (source,) = await search_dictionaries(
+            "rely", None, client, source_names=("Oxford Learner’s Dictionaries",)
+        )
+
+    assert source.status == "found"
+    assert source.excerpt == "rely · 词性 verb · 句型 rely on somebody for something"
 
 
 @pytest.mark.parametrize("lemma", ["test", "test-drive"])

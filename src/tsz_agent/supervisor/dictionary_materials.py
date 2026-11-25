@@ -15,7 +15,7 @@ from .lexicon import Material
 from .tools import DICTIONARIES
 
 # Bump when provider access, query normalization or the extracted evidence changes.
-VERSION = "lexicon-dictionary-v1"
+VERSION = "lexicon-dictionary-v2"
 
 
 class StoredDictionaryMaterial(Base):
