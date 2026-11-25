@@ -8,8 +8,8 @@ fail() {
   exit 1
 }
 
-[[ $# -eq 8 ]] || fail "invalid release arguments"
-root=$1
+[[ $# -eq 8 || $# -eq 9 ]] || fail "invalid release arguments"
+root=${1%/}
 project=$2
 database=$3
 sha=$4
@@ -17,6 +17,7 @@ run_id=$5
 run_number=$6
 attempt=$7
 archive_digest=$8
+compose_files=${9:--}
 stage="$(cd "$(dirname "$0")" && pwd -P)"
 archive="$stage/image.tar.gz"
 probe="$stage/probe.py"
@@ -29,8 +30,20 @@ probe="$stage/probe.py"
   || fail "invalid image identity"
 [[ "$run_id" =~ ^[1-9][0-9]*$ && "$run_number" =~ ^[1-9][0-9]*$ && "$attempt" =~ ^[1-9][0-9]*$ ]] \
   || fail "invalid CI run identity"
-[[ -f "$root/.env" && -f "$root/deploy/compose.yaml" && -f "$probe" && -f "$archive" ]] \
-  || fail "missing deployment or staged files"
+[[ -f "$root/.env" && -f "$probe" && -f "$archive" ]] || fail "missing deployment or staged files"
+if [[ "$compose_files" == "-" ]]; then
+  compose_files="$root/deploy/compose.yaml"
+fi
+[[ "$compose_files" =~ ^/[a-zA-Z0-9._/-]+(,/[a-zA-Z0-9._/-]+)*$ ]] \
+  || fail "invalid Compose file list"
+
+compose_args=(--project-name "$project" --env-file "$root/.env")
+IFS=, read -r -a files <<< "$compose_files"
+for file in "${files[@]}"; do
+  [[ "$file" == "$root/"* && "$file" != */../* && -f "$file" ]] \
+    || fail "Compose files must exist under the deployment directory"
+  compose_args+=(-f "$file")
+done
 
 mkdir -p "$root/.agent-cd"
 exec 9>"$root/.agent-cd/lock"
@@ -54,7 +67,6 @@ identity=$(docker image inspect --format '{{.Id}} {{index .Config.Labels "org.op
   || fail "loaded image does not match this CI commit"
 image_id=${BASH_REMATCH[1]}
 
-compose_args=(--project-name "$project" --env-file "$root/.env" -f "$root/deploy/compose.yaml")
 compose() {
   TSZ_AGENT_IMAGE="$image" docker compose "${compose_args[@]}" "$@"
 }

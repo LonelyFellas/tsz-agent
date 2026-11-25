@@ -7,7 +7,7 @@ GitHub 的「Deploy Agent to tshb-test」在本仓 main 的推送 CI 成功后�
 准备既有的 Agent Docker Compose 实例。服务器需要 Docker Compose v2 或更新版本、Bash、util-linux 的 flock 和 sha256sum。保留现有 Compose 项目名、独立数据库、配置路径和登录态卷，并确认部署账号能管理该 Compose 实例。目录应包含：
 
 - .env，服务自己的数据库、Rust 地址和凭据。示例字段见上一级 .env.example。
-- deploy/compose.yaml，API 和 worker 共用 TSZ_AGENT_IMAGE，旧 worker 和 API 都用这个文件管理。
+- 默认使用 deploy/compose.yaml。现有实例使用多份 Compose 文件时，按现有顺序配置原文件列表。API 和 worker 共用 TSZ_AGENT_IMAGE。
 - 已初始化的独立 Agent PostgreSQL 数据库，包括 Agent 表和 Alembic 版本。首次安装先显式初始化独立库，再接入 CD。上线前确认该库有可恢复的备份。
 
 在本仓 GitHub 配置：
@@ -17,8 +17,11 @@ GitHub 的「Deploy Agent to tshb-test」在本仓 main 的推送 CI 成功后�
 | 仓库变量 | TSZ_AGENT_TSHB_TEST_DIR | 上述服务器部署目录的绝对路径。配置后启用此 CD |
 | 变量 | TSZ_AGENT_TSHB_TEST_DATABASE | 服务器 .env 指向的独立 Agent 数据库名，例如 tsz_agent |
 | 可选变量 | TSZ_AGENT_TSHB_TEST_PROJECT | 已部署的 Compose 项目名。默认 tsz-agent |
+| 可选变量 | TSZ_AGENT_TSHB_TEST_COMPOSE_FILES | 逗号分隔的 Compose 文件绝对路径。按原启动顺序填写，文件位于部署目录内。默认只读取 deploy/compose.yaml |
 | tshb-test 环境 Secrets | TSHB_TEST_SSH_HOST、TSHB_TEST_SSH_USER | 测试服地址、部署账号 |
 | tshb-test 环境 Secrets | TSHB_TEST_SSH_KEY、TSHB_TEST_SSH_KNOWN_HOSTS | 部署专用 SSH 私钥、已核验的主机密钥 |
+
+使用 current 软链接和 Compose 叠加文件时，部署目录配置为其稳定的上级目录，并将 current/deploy/compose.yaml 和各叠加文件按顺序列入变量。CD 从稳定目录读取 .env 并保存发布状态。
 
 目录变量在任务入口读取，请配置为**仓库变量**。其余变量可放在仓库或 tshb-test 环境。CD 保留服务器的 .env、Compose 文件和挂载卷。若在合入 CD 以后才配置变量，可重跑当前 main 的推送 CI 来触发首次自动发布。
 
