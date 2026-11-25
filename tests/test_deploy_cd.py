@@ -106,7 +106,14 @@ elif args[0] == "inspect":
     else:
         print(state["image"])
 elif args[0] == "compose":
-    args = args[args.index("-f") + 2:]
+    files = []
+    offset = 1
+    while args[offset] in {"--project-name", "--env-file", "-f"}:
+        if args[offset] == "-f":
+            files.append(args[offset + 1])
+        offset += 2
+    assert files == state["compose_files"], files
+    args = args[offset:]
     if args[0] == "config":
         pass
     elif args[0] == "run":
@@ -140,6 +147,9 @@ else:
     ("mode", "current", "expected_status", "expected_events"),
     [
         ("ok", "0009", "accepted", ["load", "schema", "stop", "migrate", "start"]),
+        ("overlays", "0009", "accepted", ["load", "schema", "stop", "migrate", "start"]),
+        ("foreign_overlay", "0009", None, []),
+        ("invalid_compose_list", "0009", None, []),
         ("wrong_database", "0009", None, ["load", "schema"]),
         ("bad_checksum", "0009", None, []),
         ("wrong_image", "0009", None, ["load"]),
@@ -164,8 +174,27 @@ def test_publish_preserves_migration_and_rollback_boundaries(
 ):
     root = tmp_path / "instance"
     (root / "deploy").mkdir(parents=True)
-    (root / "deploy" / "compose.yaml").touch()
+    base = root / "deploy" / "compose.yaml"
+    base.touch()
     (root / ".env").touch()
+    selected_files = [str(base)]
+    compose_args = []
+    if mode == "overlays":
+        active_base = root / "current" / "deploy" / "compose.yaml"
+        active_base.parent.mkdir(parents=True)
+        overrides = [root / "compose.tshb-test.yaml", root / "compose.chatgpt.yaml"]
+        files = [active_base, *overrides]
+        for file in files:
+            file.touch()
+        selected_files = [str(file) for file in files]
+        base.unlink()
+        compose_args = [",".join(selected_files)]
+    if mode == "foreign_overlay":
+        foreign = tmp_path / "compose.foreign.yaml"
+        foreign.touch()
+        compose_args = [f"{base},{foreign}"]
+    if mode == "invalid_compose_list":
+        compose_args = [str(base) + ","]
     target_state = root / ".agent-cd" / "state"
     if mode == "obsolete":
         target_state.parent.mkdir()
@@ -192,6 +221,7 @@ def test_publish_preserves_migration_and_rollback_boundaries(
                 "image": OLD_ID,
                 "running": True,
                 "events": [],
+                "compose_files": selected_files,
             }
         )
     )
@@ -211,6 +241,7 @@ def test_publish_preserves_migration_and_rollback_boundaries(
             str(RUN_NUMBER),
             "1",
             image_digest,
+            *compose_args,
         ],
         env={
             **os.environ,
@@ -224,7 +255,7 @@ def test_publish_preserves_migration_and_rollback_boundaries(
         check=False,
         timeout=30,
     )
-    assert (outcome.returncode == 0) == (mode == "ok"), outcome.stderr.decode()
+    assert (outcome.returncode == 0) == (mode in {"ok", "overlays"}), outcome.stderr.decode()
     if expected_status is None:
         assert not target_state.exists()
     else:

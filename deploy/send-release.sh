@@ -2,11 +2,14 @@
 # Runs on Actions. Transfer only the verified image and the release entry points.
 set -euo pipefail
 umask 077
+DEPLOY_ROOT=${DEPLOY_ROOT%/}
+compose_files=${DEPLOY_COMPOSE_FILES:--}
 
 [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.:-]+$ && "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
 [[ "$DEPLOY_ROOT" =~ ^/[a-zA-Z0-9._/-]+$ && "$DEPLOY_ROOT" != */../* && "$DEPLOY_ROOT" != */.. ]]
 [[ "$DEPLOY_PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ && "$DEPLOY_DATABASE" =~ ^[a-zA-Z0-9_]+$ ]]
 [[ -n "$DEPLOY_KEY" && -n "$DEPLOY_KNOWN_HOSTS" ]]
+[[ "$compose_files" == "-" || "$compose_files" =~ ^/[a-zA-Z0-9._/-]+(,/[a-zA-Z0-9._/-]+)*$ ]]
 
 root=$(cd "$(dirname "$0")" && pwd -P)
 temp=$(mktemp -d)
@@ -75,7 +78,7 @@ if obsolete; then exit 0; fi
 
 started=true
 ssh -F "$config" agent-tshb-test bash -s -- "$remote_stage" "$DEPLOY_ROOT" "$DEPLOY_PROJECT" \
-  "$DEPLOY_DATABASE" "$CI_SHA" "$CI_RUN_ID" "$CI_RUN_NUMBER" "$CI_ATTEMPT" "$digest" <<'REMOTE'
+  "$DEPLOY_DATABASE" "$CI_SHA" "$CI_RUN_ID" "$CI_RUN_NUMBER" "$CI_ATTEMPT" "$digest" "$compose_files" <<'REMOTE'
 set -euo pipefail
 stage=$1
 shift

@@ -79,4 +79,5 @@ jobs:
           DEPLOY_ROOT: ${{ vars.TSZ_AGENT_TSHB_TEST_DIR }}
           DEPLOY_PROJECT: ${{ vars.TSZ_AGENT_TSHB_TEST_PROJECT || 'tsz-agent' }}
           DEPLOY_DATABASE: ${{ vars.TSZ_AGENT_TSHB_TEST_DATABASE }}
+          DEPLOY_COMPOSE_FILES: ${{ vars.TSZ_AGENT_TSHB_TEST_COMPOSE_FILES }}
         run: bash deploy/send-release.sh
