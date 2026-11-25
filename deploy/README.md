@@ -1,10 +1,10 @@
 # Agent 测试服自动发布
 
-GitHub 的「Deploy Agent to tshb-test」在本仓 main 的推送 CI 成功后触发。工作流核对实际 main、同一提交的最新 CI run 和成功 attempt。它为该提交构建 Linux amd64 镜像，在隔离 PostgreSQL 上显式迁移，并检查 API 和 worker。随后经 SSH 传送镜像压缩包。宿主机校验包摘要、提交标签和两个容器实际使用的镜像。
+GitHub 的「Deploy Agent to tshb-test」在本仓 main 的推送 CI 成功后触发。工作流核对实际 main、同一提交的最新 CI run 和成功 attempt。它为该提交构建 Linux amd64 镜像，在隔离 PostgreSQL 上显式迁移，并检查 API 和 worker。测试服随后使用短时下载地址从 GitHub 制品存储拉取镜像。SSH 传输发布脚本和下载请求，GitHub 凭据留在 Actions。宿主机校验制品和镜像压缩包摘要、提交标签及两个容器实际使用的镜像。
 
 ## 一次性接入
 
-准备既有的 Agent Docker Compose 实例。服务器需要 Docker Compose v2 或更新版本、Bash、util-linux 的 flock 和 sha256sum。保留现有 Compose 项目名、独立数据库、配置路径和登录态卷，并确认部署账号能管理该 Compose 实例。目录应包含：
+准备既有的 Agent Docker Compose 实例。服务器需要 Docker Compose v2 或更新版本、Bash、Python 3、util-linux 的 flock 和 sha256sum。保留现有 Compose 项目名、独立数据库、配置路径和登录态卷，并确认部署账号能管理该 Compose 实例。目录应包含：
 
 - .env，服务自己的数据库、Rust 地址和凭据。示例字段见上一级 .env.example。
 - 默认使用 deploy/compose.yaml。现有实例使用多份 Compose 文件时，按现有顺序配置原文件列表。API 和 worker 共用 TSZ_AGENT_IMAGE。
