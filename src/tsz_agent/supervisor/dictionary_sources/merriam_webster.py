@@ -311,8 +311,12 @@ async def lookup_collegiate(
             )
             if not excerpt and (target := _british_spelling_target(entries, word)):
                 related = _objects(await _fetch_collegiate(client, target, key))
-                excerpt = _entry_excerpt(
-                    word, _collegiate_entries(related, target), american_spelling=target
+                excerpt = append_grammar_evidence(
+                    _entry_excerpt(
+                        word, _collegiate_entries(related, target), american_spelling=target
+                    ),
+                    word,
+                    examples=_collegiate_examples(related, target),
                 )
                 if excerpt:
                     item.locator = SOURCE.url(target)

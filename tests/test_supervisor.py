@@ -707,6 +707,13 @@ async def test_merriam_webster_collegiate_follows_exact_spelling_reference(
                     "hwi": {"hw": "labor"},
                     "fl": "verb",
                     "ins": [{"if": "la*bored"}, {"if": "la*bor*ing"}, {"if": "la*bors"}],
+                    "def": [
+                        {
+                            "sseq": [
+                                [["sense", {"dt": [["vis", [{"t": "They labor to repair it."}]]]}]]
+                            ]
+                        }
+                    ],
                 },
                 {"hwi": {"hw": "laborer"}, "fl": "noun", "ins": [{"if": "laborers"}]},
             ],
@@ -729,6 +736,7 @@ async def test_merriam_webster_collegiate_follows_exact_spelling_reference(
             "labour · 词性 noun、verb · 读音标记 ˈlā-bər"
             " · 词形 noun [labors] · 词形 verb [labored、laboring、labors]"
             " · [ 英式拼写 labour、美式拼写 labor ]"
+            " · 例句证据 They labor to repair it."
         )
     else:
         assert requested == ["labour"]
