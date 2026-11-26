@@ -1,7 +1,7 @@
 """Read factual fields from the main entry of public dictionary pages."""
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Literal
@@ -19,6 +19,7 @@ Field = Literal[
     "example",
     "inflection",
     "inflection_note",
+    "grammar_pattern",
 ]
 
 
@@ -26,6 +27,22 @@ def regular_s_form(word: str) -> str:
     if re.search(r"[^aeiou]y$", word):
         return word[:-1] + "ies"
     return word + ("es" if word.endswith(("s", "x", "z", "ch", "sh")) else "s")
+
+
+def append_grammar_evidence(
+    excerpt: str, word: str, *, patterns: Iterable[str] = (), examples: Iterable[str] = ()
+) -> str:
+    result = excerpt
+    for label, values, limit in (("句型", patterns, 4), ("例句证据", examples, 2)):
+        unique = dict.fromkeys(" ".join(value.split()).replace(" · ", " — ") for value in values)
+        for value in [value for value in unique if value and len(value) <= 120][:limit]:
+            base = result or word
+            if base.partition(" · ")[0].casefold() != word.casefold():
+                base = f"{word} · 来源摘要 {base}"
+            field = f" · {label} {value}"
+            if len(base) + len(field) <= 1400:
+                result = base + field
+    return result
 
 
 @dataclass
@@ -127,6 +144,11 @@ class EntryFacts(HTMLParser):
 
     def display_forms(self, forms: list[str]) -> list[str]:
         return forms
+
+    def grammar_patterns(self) -> Iterable[str]:
+        return (
+            pattern for row in self.matching_records() for pattern in row.get("grammar_pattern", [])
+        )
 
     def excerpt(self, headword: str, summary: str) -> str:
         entries = self.matching_records()

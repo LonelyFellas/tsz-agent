@@ -19,7 +19,17 @@ from .runtime import Step, SupervisorRun
 
 # Bump when shared prompts, candidate validation or dictionary evidence extraction changes.
 RULES_VERSION = "lexicon-candidates-v1"
-ReusableSection = Literal["forms", "grammar"]
+ReusableSection = Literal[
+    "forms",
+    "grammar",
+    "groups",
+    "senses",
+    "definitions",
+    "equivalents",
+    "relations",
+    "examples",
+    "translations",
+]
 CandidateKey = tuple[UUID, UUID, ReusableSection, str]
 
 
@@ -54,10 +64,10 @@ def candidate_context(
     settings: Settings, body: Input, material_snapshot: str | None = None
 ) -> tuple[CandidateKey, dict[str, Any]] | None:
     scope = body.scope
-    if len(scope.sections) != 1:
+    if not scope.sections or (len(scope.sections) != 1 and scope.sections != ["senses", "dialect"]):
         return None
     section = scope.sections[0]
-    if section not in ("forms", "grammar") or plan(scope) != [section]:
+    if section == "dialect" or plan(scope) != scope.sections:
         return None
 
     agent = AGENTS[section]
@@ -67,12 +77,24 @@ def candidate_context(
         "model_endpoint": sha256(settings.supervisor_model_url.encode()).hexdigest(),
         "output_limit": gateway.OUTPUT_LIMIT,
         "section_rules": digest(
-            {"task": agent.task, "schema": agent.row.model_json_schema(), "limit": agent.limit}
+            {
+                "task": agent.task,
+                "schema": agent.row.model_json_schema(),
+                "limit": agent.limit,
+            }
         ),
         "youdao_search": bool(settings.dictionary_search_key),
         "youdao_public": settings.youdao_public_lookup_enabled,
         "merriam_webster_api": bool(settings.merriam_webster_api_key),
     }
+    if len(scope.sections) > 1:
+        versions["dialect_rules"] = digest(
+            {
+                "task": AGENTS["dialect"].task,
+                "schema": AGENTS["dialect"].row.model_json_schema(),
+                "limit": AGENTS["dialect"].limit,
+            }
+        )
     if material_snapshot is not None:
         versions["dictionary_materials"] = material_snapshot
 
@@ -102,7 +124,7 @@ async def read(db: AsyncSession, key: CandidateKey, body: Input) -> LexiconCandi
             base_revision=scope.base_revision,
             snapshot_id=scope.snapshot_id,
             done=True,
-            steps=[Step[Section](section=key[2], state="completed")],
+            steps=[Step[Section](section=section, state="completed") for section in scope.sections],
             proposals=Proposals.model_validate(stored.proposals),
             sources=[Material.model_validate(source) for source in stored.sources],
         ),
@@ -144,14 +166,16 @@ async def remember(
     versions: dict[str, Any],
     view: View,
 ) -> None:
-    section: str = key[2]
-    proposals = view.proposals.model_dump(mode="json", include={section})
-    if not proposals[section]:
+    if not view.done or any(step.state != "completed" for step in view.steps):
+        return
+    sections: set[str] = {step.section for step in view.steps}
+    proposals = view.proposals.model_dump(mode="json", include=sections)
+    if not any(proposals.values()):
         return
     statement = insert(StoredCandidate).values(
         actor_id=key[0],
         entry_id=key[1],
-        section=section,
+        section=key[2],
         fingerprint=key[3],
         source_run_id=run.id,
         run_created=run.created,

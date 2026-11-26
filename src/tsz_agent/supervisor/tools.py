@@ -12,7 +12,7 @@ from pydantic import SecretStr
 
 from .dictionary_sources import cambridge, merriam_webster, oxford, youdao
 from .dictionary_sources.source import DictionarySource, EntryReader
-from .entry_facts import EntryFacts
+from .entry_facts import EntryFacts, append_grammar_evidence
 from .lexicon import Material
 
 DICTIONARIES = {
@@ -176,6 +176,27 @@ async def lookup_entry(
                         facts.add_verified_verb_forms(form, lemma, form_summary)
                     if evidence:
                         item.excerpt = facts.excerpt(word, summary)
+                if isinstance(facts, EntryFacts):
+                    patterns = list(facts.grammar_patterns())
+                    if (
+                        isinstance(facts, oxford.OxfordEntry)
+                        and not patterns
+                        and (phrasal := facts.phrasal_entry(locator))
+                    ):
+                        phrase_url, phrase = phrasal
+                        if parser.can_fetch(agent, phrase_url):
+                            async with client.stream(
+                                "GET", phrase_url, headers=headers, follow_redirects=False
+                            ) as linked:
+                                if linked.status_code == 200 and "text/html" in linked.headers.get(
+                                    "Content-Type", ""
+                                ):
+                                    _, phrase_facts = await read_entry_page(linked, phrase, source)
+                                    if isinstance(phrase_facts, EntryFacts):
+                                        patterns = list(phrase_facts.grammar_patterns())
+                    enriched = append_grammar_evidence(item.excerpt, word, patterns=patterns)
+                    if enriched:
+                        item.locator, item.status, item.excerpt = locator, "found", enriched
                 return item
     except (TimeoutError, httpx.HTTPError, ValueError):
         pass

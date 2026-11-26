@@ -39,6 +39,12 @@ class SenseContext(Strict):
     gloss: Annotated[str, Field(max_length=500)]
 
 
+class GrammarSubPosOption(Strict):
+    code: Name
+    name_zh: Name
+    name_en: Name
+
+
 class Scope(Strict):
     run_id: UUID
     entry_id: UUID
@@ -52,6 +58,9 @@ class Scope(Strict):
     existing_pos: Annotated[list[Name], Field(max_length=60)]
     examples: Annotated[list[Text], Field(max_length=50)]
     catalog: Annotated[dict[Name, list[Name]], Field(min_length=1, max_length=60)]
+    grammar_sub_pos: Annotated[dict[Name, list[GrammarSubPosOption]], Field(max_length=60)] = Field(
+        default_factory=dict, exclude_if=lambda options: not options
+    )
     snapshot_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -92,6 +101,7 @@ class Group(BySense):
 class Grammar(Strict):
     pos: Name
     pattern: Text
+    sub_pos: Name | None = Field(default=None, exclude_if=lambda code: code is None)
 
 
 class Definition(BySense):
@@ -154,6 +164,11 @@ class SectionAgent:
         return [self.row.model_validate(item) for item in values]
 
 
+SCOPED_SENSE_RULE = (
+    "sense 必须使用 existing_senses 的显式索引。对应 gloss 非空时，严格沿用它的语义；"
+    "词典中同一个词的其他义项不适用。"
+)
+
 AGENTS: dict[Section, SectionAgent] = {
     "forms": SectionAgent(
         CandidatePos,
@@ -166,17 +181,30 @@ AGENTS: dict[Section, SectionAgent] = {
         12,
     ),
     "groups": SectionAgent(Group, "为目录中每个词义分配恰当的语义区间，提供中英文名称。"),
-    "grammar": SectionAgent(Grammar, "按词性给出常见语法结构，pattern 含目标词。"),
-    "definitions": SectionAgent(Definition, "为各词义原创简洁英文定义及媒介语解释。"),
-    "equivalents": SectionAgent(Equivalent, "按具体词义提供自然、常用的媒介语译词。"),
+    "grammar": SectionAgent(
+        Grammar,
+        "按词性给出常见语法结构，pattern 含目标词。根据该句型的实际语法功能，"
+        "从 grammar_sub_pos 中该 pos 对应的系统选项推荐一个 sub_pos，填写原始 code。"
+        "例如动词及物性看是否直接带宾语；介词宾语不是动词的直接宾语。"
+        "没有系统选项或证据不足时省略 sub_pos，不自创分类。",
+    ),
+    "definitions": SectionAgent(
+        Definition, "为各词义原创简洁英文定义及媒介语解释，两者表达同一含义。" + SCOPED_SENSE_RULE
+    ),
+    "equivalents": SectionAgent(
+        Equivalent, "按具体词义提供自然、常用的媒介语译词。" + SCOPED_SENSE_RULE
+    ),
     "relations": SectionAgent(
-        Relation, "仅提出有语义依据的近义词、反义词或派生词及其词义。无合适关联则略去。"
+        Relation,
+        "仅提出有语义依据的近义词、反义词或派生词及其词义。无合适关联则略去。" + SCOPED_SENSE_RULE,
     ),
     "dialect": SectionAgent(
         Dialect,
         "只在资料明确标注该词义限于英式或美式英语时给出 usage。evidence 原样摘取含地域标注的短语，source_locator 引用该来源。通用、仅音标不同或证据不足时返回空数组。",
     ),
-    "examples": SectionAgent(Example, "为指定词义原创匹配等级的英文例句，使用目标词。"),
+    "examples": SectionAgent(
+        Example, "为指定词义原创匹配等级的英文例句，使用目标词。" + SCOPED_SENSE_RULE
+    ),
     "translations": SectionAgent(
         Translation, "为 examples 中的句子按索引提供忠实自然的媒介语译文。"
     ),
@@ -217,6 +245,10 @@ def validate_rows(
             raise ValueError("unknown_example")
         if isinstance(row, (Sense, Grammar, CandidatePos)) and row.pos not in scope.catalog:
             raise ValueError("unknown_pos")
+        if isinstance(row, Grammar) and row.sub_pos is not None:
+            options = scope.grammar_sub_pos.get(row.pos, [])
+            if not any(option.code == row.sub_pos for option in options):
+                row.sub_pos = None
         if isinstance(row, CandidatePos):
             kinds = [f.form_type for f in row.forms]
             if (

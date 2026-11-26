@@ -53,6 +53,8 @@ def field(
                 return "inflection_note"
         if "def" in classes:
             return "definition"
+        if "cf" in classes and any("examples" in parent.classes for parent in stack):
+            return "grammar_pattern"
         if (
             "x" in classes
             and record.get("pos") in (["noun"], ["adjective"], ["adverb"])
@@ -129,12 +131,20 @@ class OxfordEntry(EntryFacts):
     def __init__(self, word: str) -> None:
         super().__init__(MARKUP, word)
         self.related_links: list[tuple[str, str]] = []
+        self.phrasal_links: list[tuple[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a":
             attr = dict(attrs)
             title = (attr.get("title") or "").casefold()
             if href := attr.get("href"):
+                phrase = title.removesuffix(" definition")
+                if (
+                    title.endswith(" definition")
+                    and phrase.startswith(self.word + " ")
+                    and any("phrasal_verb_links" in parent.classes for parent in self.stack)
+                ):
+                    self.phrasal_links.append((phrase, href))
                 for pos in _OPPOSITE_POS:
                     if title in {
                         f"{self.word} {pos} definition",
@@ -143,6 +153,16 @@ class OxfordEntry(EntryFacts):
                         self.related_links.append((pos, href))
                         break
         super().handle_starttag(tag, attrs)
+
+    def phrasal_entry(self, locator: str) -> tuple[str, str] | None:
+        for phrase, href in self.phrasal_links:
+            try:
+                url = httpx.URL(urljoin(locator, href)).copy_with(fragment=None)
+            except (ValueError, httpx.InvalidURL):
+                continue
+            if valid_redirect(url) and str(url) != locator:
+                return str(url), phrase
+        return None
 
     def handle_data(self, data: str) -> None:
         for index, element in enumerate(self.stack):

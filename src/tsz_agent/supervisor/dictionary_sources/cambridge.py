@@ -111,6 +111,8 @@ def field(
         return "word"
     if tag == "span" and "dpos" in classes and any("dpos-h" in parent.classes for parent in stack):
         return "pos"
+    if "dgc" in classes and any("dgram" in parent.classes for parent in stack):
+        return "grammar_pattern"
     if (
         "deg" in classes
         and record.get("pos") in (["noun"], ["verb"])

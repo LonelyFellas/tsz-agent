@@ -2,6 +2,7 @@ import re
 from html.parser import HTMLParser
 from urllib.parse import quote
 
+from ..entry_facts import append_grammar_evidence
 from .source import DictionarySource
 
 
@@ -16,6 +17,8 @@ class YoudaoSummary(HTMLParser):
         self._collins_headword = ""
         self._div_depth = 0
         self._definitions_depth: int | None = None
+        self._examples_depth: int | None = None
+        self._grammar_examples: list[str] = []
         self._field: tuple[str, str] | None = None
         self._field_depth = 0
         self._text: list[str] = []
@@ -45,6 +48,8 @@ class YoudaoSummary(HTMLParser):
                 self._field_depth += 1
             return
         if self._basic_complete:
+            if tag == "div" and "examples" in classes:
+                self._examples_depth = self._div_depth
             if tag == "h4":
                 self._collins_heading = True
                 self._collins_headword = ""
@@ -55,6 +60,14 @@ class YoudaoSummary(HTMLParser):
                 elif {"additional", "pattern"} <= classes:
                     self._field = (tag, "pattern")
                     self._field_depth = 1
+            if (
+                tag == "p"
+                and self._examples_depth is not None
+                and self._collins_headword.casefold() == self._headword.casefold()
+                and len(self._grammar_examples) < 2
+            ):
+                self._field = (tag, "example")
+                self._field_depth = 1
             return
         for field_tag, name in (
             ("span", "keyword"),
@@ -81,9 +94,11 @@ class YoudaoSummary(HTMLParser):
         if tag == "div" and self._div_depth:
             if self._div_depth == self._definitions_depth:
                 self._definitions_depth = None
+            if self._div_depth == self._examples_depth:
+                self._examples_depth = None
             self._div_depth -= 1
             if not self._div_depth:
-                self.finished = self._basic_complete or bool(self._forms) or not self._headword
+                self.finished = self._basic_complete or not self._headword
                 self._basic_complete = True
                 self._field = None
                 self._text.clear()
@@ -107,15 +122,17 @@ class YoudaoSummary(HTMLParser):
             self._forms = f"[{match[1]}]"
         elif field == "title":
             self._collins_headword = value
+        elif field == "example" and re.match(r"^[A-Za-z]", value):
+            self._grammar_examples.append(f"（柯林斯）{value}")
         elif (
             field == "pattern"
+            and not self._forms
             and self._collins_headword.casefold() == self._headword.casefold()
             and (match := re.fullmatch(r"\(\s*(.+?)\s*\)", value))
         ):
             forms = [form.strip() for form in match[1].split(",")]
             if all(re.fullmatch(r"[A-Za-z]+(?:[-'’ ][A-Za-z]+)*", form) for form in forms):
                 self._forms = "[ " + "、".join(dict.fromkeys(forms)) + " ]"
-                self.finished = True
         elif tag == "li" and (pos := re.match(r"^([a-z]{1,6}\.)\s", value)):
             self._positions.append(pos[1])
 
@@ -131,9 +148,10 @@ class YoudaoSummary(HTMLParser):
             "词性 " + "、".join(dict.fromkeys(self._positions)) if self._positions else "",
             self._forms,
         ]
-        if not any(facts):
-            return ""
-        return " · ".join([self._headword, *(fact for fact in facts if fact)])[:1400]
+        excerpt = (
+            " · ".join([self._headword, *(fact for fact in facts if fact)]) if any(facts) else ""
+        )
+        return append_grammar_evidence(excerpt[:1400], word, examples=self._grammar_examples)
 
 
 SOURCE = DictionarySource(
