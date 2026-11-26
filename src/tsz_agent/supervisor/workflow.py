@@ -68,12 +68,12 @@ async def infer(
 
 
 async def lookup(
-    store: Store, settings: Settings, body: Input, *, section_candidates: bool = False
+    store: Store, settings: Settings, body: Input, *, mode: candidates.CandidateMode = "legacy"
 ) -> candidates.CandidateLookup:
-    if not section_candidates and body.scope.sections not in (["forms"], ["grammar"]):
-        return candidates.CandidateLookup(candidate=None)
     async with store.sessions() as db:
-        return candidates.CandidateLookup(candidate=await candidates.current(db, settings, body))
+        return candidates.CandidateLookup(
+            candidate=await candidates.current(db, settings, body, mode=mode)
+        )
 
 
 async def fetch_dictionaries(
@@ -96,27 +96,27 @@ async def advance(
     body: Input,
     *,
     force_refresh: bool = False,
-    section_candidates: bool = False,
+    mode: candidates.CandidateMode = "legacy",
     disconnected: Callable[[], bool] | None = None,
 ) -> View:
     scope = body.scope
-    extended_run = scope.sections not in (["forms"], ["grammar"])
-    eligible = (not extended_run or section_candidates) and (
-        candidates.candidate_context(settings, body) is not None
-    )
+    eligible = candidates.candidate_context(settings, body, mode=mode) is not None
 
     async def reuse(
         db: AsyncSession,
     ) -> tuple[runtime.Execution[Section], dict[str, Any]] | None:
-        candidate = await candidates.current(db, settings, body)
+        candidate = await candidates.current(db, settings, body, mode=mode)
         if candidate is None:
             return None
         return candidate.result, {
-            scope.sections[0]: {"state": "completed", "reused_from": str(candidate.source_run_id)}
+            step.section: {"state": "completed", "reused_from": str(candidate.source_run_id)}
+            for step in candidate.result.steps
         }
 
     fingerprint_input = scope.model_dump(mode="json")
-    if extended_run and eligible:
+    if eligible and mode == "shared":
+        fingerprint_input["shared_candidates"] = True
+    elif eligible and scope.sections not in (["forms"], ["grammar"]):
         fingerprint_input["section_candidates"] = True
     if force_refresh:
         fingerprint_input["force_refresh"] = True
@@ -153,7 +153,7 @@ async def advance(
                 previous = {}
                 if eligible:
                     async with store.sessions() as db:
-                        legacy = await candidates.legacy_candidate(db, settings, body)
+                        legacy = await candidates.legacy_candidate(db, settings, body, mode=mode)
                     if legacy is not None:
                         previous = dictionary_materials.reusable(legacy.result.sources)
                 view.sources.extend(
@@ -208,7 +208,7 @@ async def advance(
     async def remember(db: AsyncSession, run: runtime.SupervisorRun) -> None:
         if disconnected is None or not disconnected():
             context = candidates.candidate_context(
-                settings, body, dictionary_materials.snapshot(view.sources)
+                settings, body, dictionary_materials.snapshot(view.sources), mode=mode
             )
             assert context is not None
             key, versions = context

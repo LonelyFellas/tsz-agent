@@ -1,11 +1,11 @@
-"""Reusable, editor-scoped outcomes of independent lexicon section runs."""
+"""Reusable outcomes of independent lexicon section runs."""
 
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, tuple_
+from sqlalchemy import DateTime, ForeignKey, Index, String, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,18 +19,8 @@ from .runtime import Step, SupervisorRun
 
 # Bump when shared prompts, candidate validation or dictionary evidence extraction changes.
 RULES_VERSION = "lexicon-candidates-v1"
-ReusableSection = Literal[
-    "forms",
-    "grammar",
-    "groups",
-    "senses",
-    "definitions",
-    "equivalents",
-    "relations",
-    "examples",
-    "translations",
-]
-CandidateKey = tuple[UUID, UUID, ReusableSection, str]
+CandidateMode = Literal["legacy", "personal", "shared"]
+CandidateKey = tuple[UUID, UUID, Section, str]
 
 
 class LexiconCandidate(Strict):
@@ -59,18 +49,35 @@ class StoredCandidate(Base):
     proposals: Mapped[dict[str, Any]] = mapped_column(JSONB)
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
 
+    __table_args__ = (
+        Index(
+            "ix_lexicon_candidates_entry_scope",
+            entry_id,
+            section,
+            fingerprint,
+            run_created.desc(),
+            source_run_id.desc(),
+        ),
+    )
+
 
 def candidate_context(
-    settings: Settings, body: Input, material_snapshot: str | None = None
+    settings: Settings,
+    body: Input,
+    material_snapshot: str | None = None,
+    *,
+    mode: CandidateMode = "legacy",
 ) -> tuple[CandidateKey, dict[str, Any]] | None:
     scope = body.scope
-    if not scope.sections or (len(scope.sections) != 1 and scope.sections != ["senses", "dialect"]):
+    sections = scope.sections
+    if len(sections) != 1 and sections != ["senses", "dialect"]:
         return None
-    section = scope.sections[0]
-    if section == "dialect" or plan(scope) != scope.sections:
+    section = sections[0]
+    if section == "dialect" or plan(scope) != sections:
+        return None
+    if mode == "legacy" and section not in ("forms", "grammar"):
         return None
 
-    agent = AGENTS[section]
     versions = {
         "rules": RULES_VERSION,
         "model": settings.deepseek_model,
@@ -78,23 +85,27 @@ def candidate_context(
         "output_limit": gateway.OUTPUT_LIMIT,
         "section_rules": digest(
             {
-                "task": agent.task,
-                "schema": agent.row.model_json_schema(),
-                "limit": agent.limit,
+                "task": AGENTS[section].task,
+                "schema": AGENTS[section].row.model_json_schema(),
+                "limit": AGENTS[section].limit,
             }
         ),
         "youdao_search": bool(settings.dictionary_search_key),
         "youdao_public": settings.youdao_public_lookup_enabled,
         "merriam_webster_api": bool(settings.merriam_webster_api_key),
     }
-    if len(scope.sections) > 1:
+    if sections == ["senses", "dialect"]:
+        dialect = AGENTS["dialect"]
         versions["dialect_rules"] = digest(
             {
-                "task": AGENTS["dialect"].task,
-                "schema": AGENTS["dialect"].row.model_json_schema(),
-                "limit": AGENTS["dialect"].limit,
+                "task": dialect.task,
+                "schema": dialect.row.model_json_schema(),
+                "limit": dialect.limit,
             }
         )
+    if mode == "shared":
+        # The browser binds this digest to the ordered node IDs and panel scope.
+        versions["shared_snapshot"] = scope.snapshot_id
     if material_snapshot is not None:
         versions["dictionary_materials"] = material_snapshot
 
@@ -111,8 +122,23 @@ def candidate_context(
     return (scope.actor_id, scope.entry_id, section, fingerprint), versions
 
 
-async def read(db: AsyncSession, key: CandidateKey, body: Input) -> LexiconCandidate | None:
-    stored = await db.get(StoredCandidate, key)
+async def read(
+    db: AsyncSession, key: CandidateKey, body: Input, *, shared: bool
+) -> LexiconCandidate | None:
+    if shared:
+        _, entry_id, section, fingerprint = key
+        stored = await db.scalar(
+            select(StoredCandidate)
+            .where(
+                StoredCandidate.entry_id == entry_id,
+                StoredCandidate.section == section,
+                StoredCandidate.fingerprint == fingerprint,
+            )
+            .order_by(StoredCandidate.run_created.desc(), StoredCandidate.source_run_id.desc())
+            .limit(1)
+        )
+    else:
+        stored = await db.get(StoredCandidate, key)
     if stored is None:
         return None
     scope = body.scope
@@ -132,31 +158,34 @@ async def read(db: AsyncSession, key: CandidateKey, body: Input) -> LexiconCandi
 
 
 async def legacy_candidate(
-    db: AsyncSession, settings: Settings, body: Input
+    db: AsyncSession, settings: Settings, body: Input, *, mode: CandidateMode
 ) -> LexiconCandidate | None:
-    context = candidate_context(settings, body)
-    return await read(db, context[0], body) if context else None
+    context = candidate_context(settings, body, mode=mode)
+    return await read(db, context[0], body, shared=mode == "shared") if context else None
 
 
-async def current(db: AsyncSession, settings: Settings, body: Input) -> LexiconCandidate | None:
-    legacy_context = candidate_context(settings, body)
+async def current(
+    db: AsyncSession, settings: Settings, body: Input, *, mode: CandidateMode
+) -> LexiconCandidate | None:
+    legacy_context = candidate_context(settings, body, mode=mode)
     if legacy_context is None:
         return None
-    legacy = await read(db, legacy_context[0], body)
+    shared = mode == "shared"
+    legacy = await read(db, legacy_context[0], body, shared=shared)
     previous = dictionary_materials.reusable(legacy.result.sources) if legacy else {}
     persisted = await dictionary_materials.read(
         db, dictionary_materials.query_key(settings, body.scope.headword)
     )
     effective = dictionary_materials.snapshot({**previous, **persisted}.values())
-    context = candidate_context(settings, body, effective)
+    context = candidate_context(settings, body, effective, mode=mode)
     assert context is not None
-    candidate = await read(db, context[0], body)
+    candidate = await read(db, context[0], body, shared=shared)
     if candidate is not None:
         return candidate
     # Earlier candidates bring their own evidence only for the same editor and generation context.
     if legacy is not None and dictionary_materials.snapshot(previous.values()) == effective:
         return legacy
-    return None
+    return await current(db, settings, body, mode="personal") if shared else None
 
 
 async def remember(
