@@ -403,20 +403,124 @@ async def test_sense_directory_caches_dialect_with_senses_only_after_completion(
 
     monkeypatch.setattr(runtime, "infer", model)
     monkeypatch.setattr(runtime, "search_dictionaries", search)
-    first = await runtime.advance(store, settings, body, section_candidates=True)
+    first = await runtime.advance(store, settings, body, mode="personal")
     assert not first.done
-    assert (
-        await runtime.lookup(store, settings, new_run(body), section_candidates=True)
-    ).candidate is None
-    completed = await runtime.advance(store, settings, body, section_candidates=True)
+    assert (await runtime.lookup(store, settings, new_run(body), mode="personal")).candidate is None
+    completed = await runtime.advance(store, settings, body, mode="personal")
     assert completed.done
     assert completed.proposals.dialect[0].usage == "en-GB"
-    cached = (
-        await runtime.lookup(store, settings, new_run(body), section_candidates=True)
-    ).candidate
+    cached = (await runtime.lookup(store, settings, new_run(body), mode="personal")).candidate
     assert cached is not None
     assert cached.result.proposals == completed.proposals
     assert [step.section for step in cached.result.steps] == ["senses", "dialect"]
+
+
+@pytest.mark.parametrize(
+    ("sections", "rows"),
+    [
+        (
+            ["forms"],
+            [
+                [
+                    {
+                        "pos": "noun",
+                        "forms": [
+                            {
+                                "form_type": "base",
+                                "is_regular": True,
+                                "uk": {"spelling": "tomorrow", "dict_phonetic": "təˈmɒrəʊ"},
+                                "us": {"spelling": "tomorrow", "dict_phonetic": "təˈmɑːroʊ"},
+                            }
+                        ],
+                    }
+                ]
+            ],
+        ),
+        (["grammar"], [[{"pos": "noun", "pattern": "by tomorrow"}]]),
+        (["groups"], [[{"sense": 0, "name_zh": "时间", "name_en": "Time"}]]),
+        (
+            ["senses", "dialect"],
+            [
+                [{"pos": "noun", "gloss": "未来", "level": "A1"}],
+                [
+                    {
+                        "sense": 1,
+                        "usage": "en-GB",
+                        "source_locator": "entry@published-1",
+                        "evidence": "British",
+                    }
+                ],
+            ],
+        ),
+        (["definitions"], [[{"sense": 0, "english": "the next day", "explanation": "明天"}]]),
+        (["equivalents"], [[{"sense": 0, "word": "明日"}]]),
+        (
+            ["relations"],
+            [[{"sense": 0, "kind": "synonym", "word": "future", "gloss": "未来", "score": 90}]],
+        ),
+        (["examples"], [[{"sense": 0, "text": "See you tomorrow.", "level": "A1"}]]),
+        (["translations"], [[{"example": 0, "text": "明天见。"}]]),
+    ],
+)
+async def test_shared_candidates_reopen_by_entry_and_scope(
+    store, settings, monkeypatch, sections, rows
+):
+    settings = settings.model_copy(
+        update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
+    )
+    body = request(sections)
+    body.materials = [
+        Material(source="智能词库", locator="entry@published-1", excerpt="British", status="found")
+    ]
+    if sections == ["translations"]:
+        body.scope.examples = ["See you tomorrow."]
+        body.scope.existing_pos = []
+    else:
+        body.scope.senses = [SenseContext(pos="noun", gloss="次日")]
+    calls = []
+
+    async def infer(settings, scope, section, view):
+        calls.append(section)
+        return {"items": rows[sections.index(section)]}, {"model": "local-stub"}
+
+    async def fetch(settings, headword, names):
+        return [dictionary_result(name) for name in names]
+
+    monkeypatch.setattr(runtime, "infer", infer)
+    monkeypatch.setattr(runtime, "fetch_dictionaries", fetch)
+    auth = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
+    sharing = {**auth, "x-tsz-next-shared-candidates": "v1"}
+    colleague = new_run(body, actor_id=uuid4(), base_revision=3)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(create_app(settings, store)), base_url="http://agent.test"
+    ) as client:
+
+        async def send(operation, payload, headers=sharing):
+            response = await client.post(
+                f"/v2/lexicon/{operation}", headers=headers, json=payload.model_dump(mode="json")
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        assert await send("candidates", colleague) == {"candidate": None}
+        for _ in sections:
+            first = await send("advance", body)
+        assert first["done"] and all(first["proposals"][section] for section in sections)
+        reopened = (await send("candidates", colleague))["candidate"]
+        assert reopened["source_run_id"] == first["run_id"]
+        assert reopened["result"]["proposals"] == first["proposals"]
+        assert reopened["result"]["run_id"] == str(colleague.scope.run_id)
+        assert reopened["result"]["base_revision"] == 3
+        assert await send("advance", colleague) == reopened["result"]
+
+        for mismatched in (
+            new_run(colleague, entry_id=uuid4()),
+            new_run(colleague, snapshot_id="b" * 64),
+            new_run(colleague, target="en-US"),
+        ):
+            assert await send("candidates", mismatched) == {"candidate": None}
+        assert await send("candidates", colleague, auth) == {"candidate": None}
+        assert calls == sections
 
 
 async def test_only_missing_dictionary_is_queried_and_new_evidence_invalidates_candidate(

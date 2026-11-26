@@ -213,11 +213,11 @@ AGENTS: dict[Section, SectionAgent] = {
 
 def plan(scope: Scope) -> list[Section]:
     selected = set(scope.sections)
-    if not scope.existing_pos and not scope.senses:
-        selected.add("forms")
     if "translations" in selected and not scope.examples:
         selected.add("examples")
-    if selected - {"forms", "grammar"} and not scope.senses:
+    if selected - {"translations"} and not scope.existing_pos and not scope.senses:
+        selected.add("forms")
+    if selected - {"forms", "grammar", "translations"} and not scope.senses:
         selected.add("senses")
     return [section for section in AGENTS if section in selected]
 

@@ -11,6 +11,15 @@ from tsz_agent.supervisor.runtime import AdmissionLimit
 from .problems import Problem
 
 SECTION_CANDIDATES_HEADER = "x-tsz-next-section-candidates"
+SHARED_CANDIDATES_HEADER = "x-tsz-next-shared-candidates"
+
+
+def candidate_mode(request: Request) -> candidates.CandidateMode:
+    if request.headers.get(SHARED_CANDIDATES_HEADER) == "v1":
+        return "shared"
+    if request.headers.get(SECTION_CANDIDATES_HEADER) == "v1":
+        return "personal"
+    return "legacy"
 
 
 def build_router(settings: Settings, store: Store) -> APIRouter:
@@ -57,7 +66,7 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
                 settings,
                 body,
                 force_refresh=refresh,
-                section_candidates=request.headers.get(SECTION_CANDIDATES_HEADER) == "v1",
+                mode=candidate_mode(request),
                 disconnected=disconnected.is_set,
             )
         except AdmissionLimit as exc:
@@ -81,11 +90,6 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
     ) -> candidates.CandidateLookup:
         if not enabled():
             raise Problem(503, "generation_unavailable")
-        return await workflow.lookup(
-            store,
-            settings,
-            body,
-            section_candidates=request.headers.get(SECTION_CANDIDATES_HEADER) == "v1",
-        )
+        return await workflow.lookup(store, settings, body, mode=candidate_mode(request))
 
     return router
