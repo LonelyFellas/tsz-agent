@@ -35,13 +35,21 @@ VERB_LABELS = {"现在分词", "过去式", "过去分词"}
 
 
 def valid_redirect(url: httpx.URL) -> bool:
-    return (
-        url.scheme == "https"
-        and url.host == HOST
-        and url.port is None
-        and not (url.userinfo or url.query or url.fragment)
-        and _ENTRY_SLUG.fullmatch(url.path) is not None
-    )
+    if (
+        url.scheme != "https"
+        or url.host != HOST
+        or url.port is not None
+        or url.userinfo
+        or url.fragment
+        or len(str(url)) > 1000
+        or _ENTRY_SLUG.fullmatch(url.path) is None
+    ):
+        return False
+    # Cambridge may put the original lookup in q when redirecting to a word slug.
+    parameters = url.params.multi_items()
+    if not url.query:
+        return True
+    return len(parameters) == 1 and parameters[0][0] == "q" and 0 < len(parameters[0][1]) <= 200
 
 
 def regular_ing_form(word: str) -> str:
@@ -265,7 +273,7 @@ class CambridgeEntry(EntryFacts):
                 "form": [f"英式拼写 {british}", f"美式拼写 {self.word}"],
             }
         )
-        return f"https://{HOST}/dictionary/english/{quote(british, safe='')}", british
+        return f"https://{HOST}{ENTRY_PATH}{quote(british, safe='')}", british
 
 
 SOURCE = DictionarySource(

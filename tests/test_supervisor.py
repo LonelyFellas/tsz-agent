@@ -67,6 +67,133 @@ def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
     ) == [{"pos": "noun", "pattern": "a tomorrow"}]
 
 
+@pytest.mark.parametrize(
+    ("location", "rules", "headword", "follows", "status"),
+    [
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate",
+            "Allow: /",
+            "real estate",
+            True,
+            "found",
+        ),
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate",
+            "Disallow: /dictionary/english/real-estate",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        (
+            "https://example.test/dictionary/english/real-estate?q=real%2Bestate",
+            "Allow: /",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        ("/search/english/?q=real%2Bestate", "Allow: /", "real estate", False, "unavailable"),
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate&other=1",
+            "Allow: /",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        (
+            "/dictionary/english/real-estate-agent?q=real%2Bestate",
+            "Allow: /",
+            "real estate agent",
+            True,
+            "unavailable",
+        ),
+    ],
+)
+async def test_cambridge_redirect_preserves_exact_phrase_evidence(
+    location, rules, headword, follows, status
+):
+    visited = []
+
+    def reply(request):
+        assert request.url.host == "dictionary.cambridge.org"
+        visited.append(request.url.raw_path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=f"User-agent: *\n{rules}")
+        if request.url.raw_path == b"/dictionary/english/real%20estate":
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            text=f'''<meta name="description" content="{headword} definition: Example.">
+              <div class="entry-body__el"><span class="dhw">{headword}</span>
+              <div class="dpos-h"><span class="dpos">noun</span>
+              <span class="uk"><span class="ipa">ˈrɪəl ɪˌsteɪt</span></span>
+              <span class="us"><span class="ipa">ˈriː.əl ɪˌsteɪt</span></span></div></div>''',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        (material,) = await search_dictionaries(
+            "real estate", None, client, source_names=("Cambridge Dictionary",)
+        )
+
+    expected_requests = [b"/robots.txt", b"/dictionary/english/real%20estate"]
+    if follows:
+        expected_requests.append(location.encode())
+    assert visited == expected_requests
+    assert material.status == status
+    if status == "found":
+        assert material.locator == "https://dictionary.cambridge.org" + location
+        assert "英 [ˈrɪəl ɪˌsteɪt] / 美 [ˈriː.əl ɪˌsteɪt] · 词性 noun" in material.excerpt
+    else:
+        assert material.excerpt == ""
+
+
+async def test_dictionary_reference_retries_only_the_selected_source(settings, monkeypatch):
+    settings = settings.model_copy(
+        update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
+    )
+    name = "Cambridge Dictionary"
+    calls = []
+
+    async def fetch(headword, key, client, *, source_names, **options):
+        calls.append((headword, source_names))
+        return [
+            Material(
+                source=name,
+                locator="https://dictionary.cambridge.org/dictionary/english/center",
+                status="found" if len(calls) == 2 else "unavailable",
+                excerpt="center · 词性 noun" if len(calls) == 2 else "",
+            )
+        ]
+
+    monkeypatch.setattr(runtime, "search_dictionaries", fetch)
+    auth = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(create_app(settings)), base_url="http://agent.test"
+    ) as client:
+        capability = await client.get("/v2/lexicon/capability", headers=auth)
+        assert capability.status_code == 200
+        assert capability.json() == {
+            "generation": True,
+            "generation_candidates": True,
+            "grammar_sub_pos": True,
+            "section_generation_candidates": True,
+            "dictionary_refresh": True,
+        }
+        path = "/v2/lexicon/dictionary-reference"
+        request_body = {"headword": "center", "source": name}
+        assert (await client.post(path, json=request_body)).status_code == 401
+        unsupported = await client.post(
+            path, headers=auth, json={**request_body, "source": "https://example.com"}
+        )
+        assert unsupported.status_code == 422
+        first = await client.post(path, headers=auth, json=request_body)
+        second = await client.post(path, headers=auth, json=request_body)
+        assert first.status_code == second.status_code == 200
+        assert first.json()["status"] == "unavailable"
+        assert second.json()["status"] == "found"
+    assert calls == [("center", (name,)), ("center", (name,))]
+
+
 async def test_concurrent_replay_and_invalid_sense_do_not_duplicate_calls(
     store, settings, monkeypatch
 ):

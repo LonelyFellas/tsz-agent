@@ -27,7 +27,15 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
             "generation_candidates": active,
             "grammar_sub_pos": active,
             "section_generation_candidates": active,
+            "dictionary_refresh": active,
         }
+
+    @router.post("/lexicon/dictionary-reference")
+    async def dictionary_reference(body: lexicon.DictionaryLookup) -> lexicon.Material:
+        if not enabled():
+            raise Problem(503, "generation_unavailable")
+        (reference,) = await workflow.fetch_dictionaries(settings, body.headword, (body.source,))
+        return reference
 
     async def execute(
         request: Request, body: lexicon.Input, *, refresh: bool = False

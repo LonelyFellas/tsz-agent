@@ -76,6 +76,20 @@ async def lookup(
         return candidates.CandidateLookup(candidate=await candidates.current(db, settings, body))
 
 
+async def fetch_dictionaries(
+    settings: Settings, headword: str, names: tuple[str, ...]
+) -> list[Material]:
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        return await search_dictionaries(
+            headword,
+            settings.dictionary_search_key,
+            client,
+            youdao_public_lookup=settings.youdao_public_lookup_enabled,
+            merriam_webster_api_key=settings.merriam_webster_api_key,
+            source_names=names,
+        )
+
+
 async def advance(
     store: Store,
     settings: Settings,
@@ -134,15 +148,7 @@ async def advance(
             if not any(s.source in DICTIONARIES for s in view.sources):
 
                 async def fetch(names: tuple[str, ...]) -> list[Material]:
-                    async with httpx.AsyncClient(follow_redirects=False) as client:
-                        return await search_dictionaries(
-                            scope.headword,
-                            settings.dictionary_search_key,
-                            client,
-                            youdao_public_lookup=settings.youdao_public_lookup_enabled,
-                            merriam_webster_api_key=settings.merriam_webster_api_key,
-                            source_names=names,
-                        )
+                    return await fetch_dictionaries(settings, scope.headword, names)
 
                 previous = {}
                 if eligible:
