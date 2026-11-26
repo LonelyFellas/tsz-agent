@@ -2210,7 +2210,7 @@
         "additionalProperties": false,
         "properties": {
           "gloss": {
-            "maxLength": 100,
+            "maxLength": 5000,
             "minLength": 1,
             "title": "Gloss",
             "type": "string"
@@ -2225,9 +2225,9 @@
             "type": "string"
           },
           "score": {
-            "maximum": 99.9,
+            "maximum": 100.0,
             "minimum": 0.0,
-            "multipleOf": 0.1,
+            "multipleOf": 0.01,
             "title": "Score",
             "type": "number"
           },
@@ -2238,8 +2238,9 @@
             "type": "integer"
           },
           "word": {
-            "maxLength": 100,
+            "maxLength": 200,
             "minLength": 1,
+            "pattern": "^[\\p{Script=Latin}\\p{Mark}0-9 '’\\-.&/,]*\\p{Script=Latin}[\\p{Script=Latin}\\p{Mark}0-9 '’\\-.&/,]*$",
             "title": "Word",
             "type": "string"
           }
