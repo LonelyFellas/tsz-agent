@@ -40,6 +40,86 @@ def request(sections):
     )
 
 
+@pytest.mark.parametrize(
+    ("location", "rules", "headword", "follows", "status"),
+    [
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate",
+            "Allow: /",
+            "real estate",
+            True,
+            "found",
+        ),
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate",
+            "Disallow: /dictionary/english/real-estate",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        (
+            "https://example.test/dictionary/english/real-estate?q=real%2Bestate",
+            "Allow: /",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        ("/search/english/?q=real%2Bestate", "Allow: /", "real estate", False, "unavailable"),
+        (
+            "/dictionary/english/real-estate?q=real%2Bestate&other=1",
+            "Allow: /",
+            "real estate",
+            False,
+            "unavailable",
+        ),
+        (
+            "/dictionary/english/real-estate-agent?q=real%2Bestate",
+            "Allow: /",
+            "real estate agent",
+            True,
+            "unavailable",
+        ),
+    ],
+)
+async def test_cambridge_redirect_preserves_exact_phrase_evidence(
+    location, rules, headword, follows, status
+):
+    visited = []
+
+    def reply(request):
+        assert request.url.host == "dictionary.cambridge.org"
+        visited.append(request.url.raw_path)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=f"User-agent: *\n{rules}")
+        if request.url.raw_path == b"/dictionary/english/real%20estate":
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            text=f'''<meta name="description" content="{headword} definition: Example.">
+              <div class="entry-body__el"><span class="dhw">{headword}</span>
+              <div class="dpos-h"><span class="dpos">noun</span>
+              <span class="uk"><span class="ipa">ˈrɪəl ɪˌsteɪt</span></span>
+              <span class="us"><span class="ipa">ˈriː.əl ɪˌsteɪt</span></span></div></div>''',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        (material,) = await search_dictionaries(
+            "real estate", None, client, source_names=("Cambridge Dictionary",)
+        )
+
+    expected_requests = [b"/robots.txt", b"/dictionary/english/real%20estate"]
+    if follows:
+        expected_requests.append(location.encode())
+    assert visited == expected_requests
+    assert material.status == status
+    if status == "found":
+        assert material.locator == "https://dictionary.cambridge.org" + location
+        assert "英 [ˈrɪəl ɪˌsteɪt] / 美 [ˈriː.əl ɪˌsteɪt] · 词性 noun" in material.excerpt
+    else:
+        assert material.excerpt == ""
+
+
 async def test_dictionary_reference_retries_only_the_selected_source(settings, monkeypatch):
     settings = settings.model_copy(
         update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
