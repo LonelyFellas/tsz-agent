@@ -25,6 +25,7 @@ Section = Literal[
 ]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Headword = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Level = Literal["A1", "A2", "B1", "B2", "C1", "C2"]
 Index = Annotated[int, Field(ge=0, lt=100)]
 
@@ -43,7 +44,7 @@ class Scope(Strict):
     entry_id: UUID
     actor_id: UUID
     base_revision: Annotated[int, Field(ge=1)]
-    headword: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    headword: Headword
     medium: Literal["zh-Hans", "zh-Hant"]
     target: Literal["en-GB", "en-US"]
     sections: Annotated[list[Section], Field(min_length=1, max_length=10)]
@@ -52,6 +53,13 @@ class Scope(Strict):
     examples: Annotated[list[Text], Field(max_length=50)]
     catalog: Annotated[dict[Name, list[Name]], Field(min_length=1, max_length=60)]
     snapshot_id: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class DictionaryLookup(Strict):
+    headword: Headword
+    source: Literal[
+        "有道", "Oxford Learner’s Dictionaries", "Merriam-Webster", "Cambridge Dictionary"
+    ]
 
 
 class Material(Strict):
