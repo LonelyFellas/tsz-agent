@@ -67,6 +67,33 @@ def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
     ) == [{"pos": "noun", "pattern": "a tomorrow"}]
 
 
+def test_relation_candidates_follow_the_editor_template():
+    scope = request(["relations"]).scope
+    scope.headword = "chat"
+    scope.senses = [SenseContext(pos="noun", gloss="轻松、非正式的交谈")]
+    synonym = {"sense": 0, "kind": "synonym", "word": "small talk", "gloss": "闲谈", "score": 85.25}
+    derivative = {**synonym, "kind": "derivative", "word": "chatty", "gloss": "健谈的", "score": 90}
+    raw = {
+        "items": [
+            {**synonym, "word": "闲聊", "gloss": "非正式交谈"},
+            {**derivative, "word": "chats", "gloss": "闲聊（复数形式）"},
+            synonym,
+            {**synonym, "word": "Small  Talk", "gloss": "寒暄"},
+            {**synonym, "word": "conversation", "score": 100},
+            {**synonym, "word": "gossip", "score": 80.123},
+            {**synonym, "word": "gossip", "sense": 1},
+            derivative,
+            {**derivative, "gloss": "轻松随意的"},
+        ]
+    }
+    assert validate_rows("relations", raw, scope, Proposals()) == [
+        synonym,
+        {**synonym, "word": "conversation", "score": 100},
+        derivative,
+        {**derivative, "gloss": "轻松随意的"},
+    ]
+
+
 @pytest.mark.parametrize(
     ("location", "rules", "headword", "follows", "status"),
     [

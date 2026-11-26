@@ -1,14 +1,24 @@
 """Section agents and the dependency plan for the smart lexicon editor."""
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Annotated, Literal
+from unicodedata import category, normalize
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
 from tsz_agent.form_candidates import CandidatePos
 
+from .entry_facts import regular_s_form
 from .runtime import Execution
 
 Section = Literal[
@@ -115,9 +125,21 @@ class Equivalent(BySense):
 
 class Relation(BySense):
     kind: Literal["synonym", "antonym", "derivative"]
-    word: Name
-    gloss: Name
-    score: Annotated[float, Field(ge=0, le=99.9, multiple_of=0.1)]
+    word: Annotated[
+        Headword,
+        Field(
+            pattern=r"^[\p{Script=Latin}\p{Mark}0-9 '’\-.&/,]*\p{Script=Latin}[\p{Script=Latin}\p{Mark}0-9 '’\-.&/,]*$"
+        ),
+    ]
+    gloss: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000)]
+    score: Annotated[float, Field(strict=True, ge=0, le=100, multiple_of=0.01)]
+
+    @field_validator("word", "gloss", mode="before")
+    @classmethod
+    def reject_control_characters(cls, value: object) -> object:
+        if isinstance(value, str) and any(category(char) == "Cc" for char in value):
+            raise ValueError("control_character")
+        return value
 
 
 class Dialect(BySense):
@@ -161,7 +183,14 @@ class SectionAgent:
         values = output["items"]
         if not isinstance(values, list) or len(values) > self.limit:
             raise ValueError("invalid_output")
-        return [self.row.model_validate(item) for item in values]
+        rows = []
+        for item in values:
+            try:
+                rows.append(self.row.model_validate(item))
+            except ValidationError:
+                if self.row is not Relation:
+                    raise
+        return rows
 
 
 SCOPED_SENSE_RULE = (
@@ -196,7 +225,17 @@ AGENTS: dict[Section, SectionAgent] = {
     ),
     "relations": SectionAgent(
         Relation,
-        "仅提出有语义依据的近义词、反义词或派生词及其词义。无合适关联则略去。" + SCOPED_SENSE_RULE,
+        "按系统拓展词表单，针对 existing_senses 指定的具体词义生成近义词、反义词或派生词。"
+        "先检查 sources 中 locator 为 published-relation-senses 的智能词库候选。"
+        "逐个判断候选词义与当前词义的关系，优先推荐合适的内部词义。"
+        "选中内部候选时原样返回它的 word 和 gloss，以便直接关联该词义。外部资料用于判断关系，不改写内部候选的词面或释义。"
+        "内部候选不足时再用外部资料补充，词面相似本身不代表存在关联。"
+        "word 填可独立检索的英文原形词条或短语，gloss 填该关联词义的简短媒介语释义，两者各填各的字段。"
+        "仅产出与当前词义直接相关的候选。派生词必须是独立词条，复数、第三人称、时态、分词、比较级和英美拼写变体属于词形步骤。"
+        "例如 chat 的近义词可填 word=small talk、gloss=寒暄，派生词可填 word=chatty、gloss=健谈的，chats 属于词形。"
+        "score 是 0–100 的百分数，最多两位小数，分别表示近义词的相似度、反义词的差异度、派生词的关联度。"
+        "同类近义词或反义词的同一英文词面只填一条词义。派生词可为同一词面填写多条不同的关联词义，共用一个关联度。"
+        "没有合适候选的类型可以留空。" + SCOPED_SENSE_RULE,
     ),
     "dialect": SectionAgent(
         Dialect,
@@ -226,11 +265,57 @@ def sense_list(scope: Scope, result: Proposals) -> list[SenseContext]:
     return [*scope.senses, *[SenseContext(pos=s.pos, gloss=s.gloss) for s in result.senses]]
 
 
+def relation_key(word: str) -> str:
+    return (
+        " ".join(normalize("NFKC", word).split())
+        .lower()
+        .translate(str.maketrans("‘’ʼ‐‑‒–—−", "'''------"))
+    )
+
+
+def relation_rows(
+    rows: Sequence[BaseModel], headword: str, sense_count: int, forms: list[CandidatePos]
+) -> list[dict[str, object]]:
+    headword_key = relation_key(headword)
+    entry_forms = {
+        relation_key(variant.spelling)
+        for part in forms
+        for form in part.forms
+        for variant in (form.uk, form.us)
+    }
+    entry_forms.add(headword_key)
+    if re.fullmatch(r"[a-z]+", headword_key):
+        entry_forms.add(regular_s_form(headword_key))
+    targets: dict[tuple[int, str, str], Relation] = {}
+    seen: set[tuple[int, str, str, str]] = set()
+    accepted = []
+    for row in rows:
+        if not isinstance(row, Relation) or row.sense >= sense_count:
+            continue
+        key = relation_key(row.word)
+        if key in entry_forms:
+            continue
+        target = (row.sense, row.kind, key)
+        identity = (*target, row.gloss if row.kind == "derivative" else "")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        first = targets.setdefault(target, row)
+        accepted.append(
+            row.model_copy(
+                update={"word": " ".join(first.word.split()), "score": first.score}
+            ).model_dump()
+        )
+    return accepted
+
+
 def validate_rows(
     section: Section, raw: object, scope: Scope, result: Proposals
 ) -> list[dict[str, object]]:
     rows = AGENTS[section].parse(raw)
     senses = sense_list(scope, result)
+    if section == "relations":
+        return relation_rows(rows, scope.headword, len(senses), result.forms)
     entry_pos = (
         set(scope.existing_pos) | {s.pos for s in scope.senses} | {p.pos for p in result.forms}
     )
