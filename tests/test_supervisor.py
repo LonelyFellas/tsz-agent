@@ -40,6 +40,44 @@ def request(sections):
     )
 
 
+async def test_dictionary_reference_retries_only_the_selected_source(settings, monkeypatch):
+    settings = settings.model_copy(
+        update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
+    )
+    name = "Cambridge Dictionary"
+    calls = []
+
+    async def fetch(headword, key, client, *, source_names, **options):
+        calls.append((headword, source_names))
+        return [
+            Material(
+                source=name,
+                locator="https://dictionary.cambridge.org/dictionary/english/center",
+                status="found" if len(calls) == 2 else "unavailable",
+                excerpt="center · 词性 noun" if len(calls) == 2 else "",
+            )
+        ]
+
+    monkeypatch.setattr(runtime, "search_dictionaries", fetch)
+    auth = {"Authorization": "Bearer " + settings.api_token.get_secret_value()}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(create_app(settings)), base_url="http://agent.test"
+    ) as client:
+        path = "/v2/lexicon/dictionary-reference"
+        request_body = {"headword": "center", "source": name}
+        assert (await client.post(path, json=request_body)).status_code == 401
+        unsupported = await client.post(
+            path, headers=auth, json={**request_body, "source": "https://example.com"}
+        )
+        assert unsupported.status_code == 422
+        first = await client.post(path, headers=auth, json=request_body)
+        second = await client.post(path, headers=auth, json=request_body)
+        assert first.status_code == second.status_code == 200
+        assert first.json()["status"] == "unavailable"
+        assert second.json()["status"] == "found"
+    assert calls == [("center", (name,)), ("center", (name,))]
+
+
 async def test_concurrent_replay_and_invalid_sense_do_not_duplicate_calls(
     store, settings, monkeypatch
 ):
