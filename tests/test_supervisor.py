@@ -15,15 +15,17 @@ from tsz_agent.supervisor.dictionary_sources.cambridge import CambridgeEntry
 from tsz_agent.supervisor.dictionary_sources.oxford import OxfordEntry
 from tsz_agent.supervisor.dictionary_sources.youdao import YoudaoSummary
 from tsz_agent.supervisor.lexicon import (
+    Grammar,
     GrammarSubPosOption,
     Input,
     Material,
     Proposals,
     Scope,
     SenseContext,
+    View,
     validate_rows,
 )
-from tsz_agent.supervisor.runtime import SupervisorRun
+from tsz_agent.supervisor.runtime import Step, SupervisorRun
 from tsz_agent.supervisor.tools import search_dictionaries
 
 
@@ -65,6 +67,141 @@ def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
     assert validate_rows(
         "grammar", {"items": [valid]}, request(["grammar"]).scope, Proposals()
     ) == [{"pos": "noun", "pattern": "a tomorrow"}]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "recommendation", "expected"),
+    [
+        ("run something + adv./prep.", "V-T-COMPLEX", None),
+        ("run something + from home", "V-T-COMPLEX", None),
+        ("run + object + object complement", "V-T-COMPLEX", None),
+        (
+            "run + object + object complement (e.g. run the company from home)",
+            "V-T-COMPLEX",
+            None,
+        ),
+        (
+            "run + object + object complement (e.g. run [the company] [from home])",
+            "V-T-COMPLEX",
+            None,
+        ),
+        (
+            "run + object + object complement (e.g. run [the company] [yesterday])",
+            "V-T-COMPLEX",
+            None,
+        ),
+        (
+            "run + object + object complement (e.g. run [the company] [fast])",
+            "V-T-COMPLEX",
+            None,
+        ),
+        (
+            "run + object + object complement (e.g. run [the engine] [hot])",
+            "V-T-COMPLEX",
+            "V-T-COMPLEX",
+        ),
+        (
+            "run + object + object complement (e.g. run [the business] [into the ground])",
+            "V-T-COMPLEX",
+            "V-T-COMPLEX",
+        ),
+        ("run something + from home", "V-T-MONO", "V-T-MONO"),
+        ("run + adv./prep.", "V-I", "V-I"),
+    ],
+)
+def test_grammar_requires_an_explicit_object_complement(pattern, recommendation, expected):
+    scope = request(["grammar"]).scope.model_copy(
+        update={"headword": "run", "catalog": {"verb": ["base"]}, "existing_pos": ["verb"]}
+    )
+    scope.grammar_sub_pos = {
+        "verb": [
+            GrammarSubPosOption(code=code, name_zh=code, name_en=code)
+            for code in ("V-T-COMPLEX", "V-T-MONO", "V-I")
+        ],
+    }
+    rows = validate_rows(
+        "grammar",
+        {"items": [{"pos": "verb", "pattern": pattern, "sub_pos": recommendation}]},
+        scope,
+        Proposals(),
+    )
+    assert len(rows) == 1 and rows[0]["pattern"] == pattern
+    assert rows[0].get("sub_pos") == expected
+
+
+@pytest.mark.parametrize(
+    ("headword", "example", "verified"),
+    [
+        ("go", "go [straight] [to sleep]", False),
+        ("play", "play [the game] [clean]", False),
+        ("make", "make [them] [happy]", True),
+        ("elect", "elect [her] [president]", True),
+    ],
+)
+def test_complex_transitive_requires_a_verified_complete_example(headword, example, verified):
+    scope = request(["grammar"]).scope.model_copy(
+        update={"headword": headword, "catalog": {"verb": ["base"]}, "existing_pos": ["verb"]}
+    )
+    scope.grammar_sub_pos = {
+        "verb": [
+            GrammarSubPosOption(
+                code="V-T-COMPLEX", name_zh="复合及物", name_en="complex transitive"
+            )
+        ]
+    }
+    pattern = f"{headword} + object + object complement (e.g. {example})"
+    row = {"pos": "verb", "pattern": pattern}
+    proposed = {**row, "sub_pos": "V-T-COMPLEX"}
+    assert validate_rows("grammar", {"items": [proposed]}, scope, Proposals()) == [
+        proposed if verified else row
+    ]
+
+
+async def test_grammar_replay_removes_old_ambiguous_complex_transitive_recommendation(
+    settings, monkeypatch
+):
+    settings = settings.model_copy(
+        update={"supervisor_enabled": True, "deepseek_api_key": SecretStr("local-test-only")}
+    )
+    body = request(["grammar"])
+    body.scope.headword = "run"
+    body.scope.existing_pos = ["verb"]
+    body.scope.catalog = {"verb": ["base"]}
+    body.scope.grammar_sub_pos = {
+        "verb": [
+            GrammarSubPosOption(
+                code="V-T-COMPLEX", name_zh="复合及物", name_en="complex transitive"
+            )
+        ],
+    }
+
+    async def replay(*args, **kwargs):
+        return View(
+            run_id=body.scope.run_id,
+            base_revision=body.scope.base_revision,
+            snapshot_id=body.scope.snapshot_id,
+            done=True,
+            steps=[Step(section="grammar", state="completed")],
+            proposals=Proposals(
+                grammar=[
+                    Grammar(pos="verb", pattern="run something + adv./prep.", sub_pos="V-T-COMPLEX")
+                ]
+            ),
+            sources=[],
+        )
+
+    monkeypatch.setattr(runtime, "advance", replay)
+    transport = httpx.ASGITransport(create_app(settings))
+    async with httpx.AsyncClient(transport=transport, base_url="http://agent.test") as client:
+        response = await client.post(
+            "/v2/lexicon/advance",
+            json=body.model_dump(mode="json"),
+            headers={"Authorization": "Bearer " + settings.api_token.get_secret_value()},
+        )
+    assert response.status_code == 200
+    assert response.json()["proposals"]["grammar"] == [
+        {"pos": "verb", "pattern": "run something + adv./prep."}
+    ]
 
 
 @pytest.mark.parametrize(

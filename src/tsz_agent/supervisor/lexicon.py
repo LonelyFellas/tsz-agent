@@ -169,6 +169,27 @@ SCOPED_SENSE_RULE = (
     "词典中同一个词的其他义项不适用。"
 )
 
+OBJECT_COMPLEMENT_PATTERN = " + object + object complement (e.g. "
+# Full constructions with a clear direct object and an object-oriented predicate.
+# Arbitrary AI-generated examples may still be displayed as unclassified patterns.
+OBJECT_COMPLEMENT_EXAMPLES: dict[str, tuple[str, ...]] = {
+    "appoint": ("appoint [her] [chair]",),
+    "call": ("call [it] [a mistake]",),
+    "consider": ("consider [him] [an expert]",),
+    "drive": ("drive [him] [mad]",),
+    "elect": ("elect [her] [president]",),
+    "find": ("find [it] [difficult]",),
+    "keep": ("keep [them] [safe]",),
+    "leave": ("leave [the door] [open]",),
+    "make": ("make [them] [happy]",),
+    "paint": ("paint [the door] [red]",),
+    "run": (
+        "run [the engine] [hot]",
+        "run [the tank] [dry]",
+        "run [the business] [into the ground]",
+    ),
+}
+
 AGENTS: dict[Section, SectionAgent] = {
     "forms": SectionAgent(
         CandidatePos,
@@ -185,7 +206,15 @@ AGENTS: dict[Section, SectionAgent] = {
         Grammar,
         "按词性给出常见语法结构，pattern 含目标词。根据该句型的实际语法功能，"
         "从 grammar_sub_pos 中该 pos 对应的系统选项推荐一个 sub_pos，填写原始 code。"
-        "例如动词及物性看是否直接带宾语；介词宾语不是动词的直接宾语。"
+        "判断动作义的及物性时，只有状语、没有直接宾语用 V-I；"
+        "只有一个直接宾语和可选状语用 V-T-MONO（若目录有对应选项）。"
+        "只有直接宾语之后有明确描述该宾语的身份、性质、动作或结果状态的宾语补足语时，才用 V-T-COMPLEX。"
+        "修饰动作的时间、地点、方式等副词或介词短语不是宾补，不能仅因出现在宾语后就推荐复合及物。"
+        f"推荐 V-T-COMPLEX 时，pattern 写成「目标词{OBJECT_COMPLEMENT_PATTERN}目标词 [具体宾语] [宾补])」。"
+        "例如 make + object + object complement (e.g. make [them] [happy])，happy 描述宾语 them。"
+        "只在例子与目标词及义项吻合，并能逐字使用以下范例之一时推荐 V-T-COMPLEX："
+        f"{'；'.join(example for examples in OBJECT_COMPLEMENT_EXAMPLES.values() for example in examples)}。"
+        "不同子类的句型应分别列出。"
         "没有系统选项或证据不足时省略 sub_pos，不自创分类。",
     ),
     "definitions": SectionAgent(
@@ -226,6 +255,23 @@ def sense_list(scope: Scope, result: Proposals) -> list[SenseContext]:
     return [*scope.senses, *[SenseContext(pos=s.pos, gloss=s.gloss) for s in result.senses]]
 
 
+def retain_grammar_sub_pos(row: Grammar, scope: Scope) -> None:
+    if row.sub_pos is None:
+        return
+    if not any(option.code == row.sub_pos for option in scope.grammar_sub_pos.get(row.pos, [])):
+        row.sub_pos = None
+        return
+    if row.sub_pos == "V-T-COMPLEX":
+        headword = scope.headword.casefold()
+        prefix = headword + OBJECT_COMPLEMENT_PATTERN
+        pattern = row.pattern.casefold()
+        if not any(
+            pattern == f"{prefix}{example})"
+            for example in OBJECT_COMPLEMENT_EXAMPLES.get(headword, ())
+        ):
+            row.sub_pos = None
+
+
 def validate_rows(
     section: Section, raw: object, scope: Scope, result: Proposals
 ) -> list[dict[str, object]]:
@@ -245,10 +291,8 @@ def validate_rows(
             raise ValueError("unknown_example")
         if isinstance(row, (Sense, Grammar, CandidatePos)) and row.pos not in scope.catalog:
             raise ValueError("unknown_pos")
-        if isinstance(row, Grammar) and row.sub_pos is not None:
-            options = scope.grammar_sub_pos.get(row.pos, [])
-            if not any(option.code == row.sub_pos for option in options):
-                row.sub_pos = None
+        if isinstance(row, Grammar):
+            retain_grammar_sub_pos(row, scope)
         if isinstance(row, CandidatePos):
             kinds = [f.form_type for f in row.forms]
             if (

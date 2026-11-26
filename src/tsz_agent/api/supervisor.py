@@ -61,7 +61,7 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
 
         watcher = asyncio.create_task(watch_disconnect())
         try:
-            return await workflow.advance(
+            view = await workflow.advance(
                 store,
                 settings,
                 body,
@@ -69,6 +69,10 @@ def build_router(settings: Settings, store: Store) -> APIRouter:
                 mode=candidate_mode(request),
                 disconnected=disconnected.is_set,
             )
+            # A replay can return a completed run generated before the current rules.
+            for row in view.proposals.grammar:
+                lexicon.retain_grammar_sub_pos(row, body.scope)
+            return view
         except AdmissionLimit as exc:
             raise Problem(429, "run_limit") from exc
         finally:
