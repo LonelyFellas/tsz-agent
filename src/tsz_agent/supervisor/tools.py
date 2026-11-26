@@ -134,6 +134,11 @@ async def lookup_entry(
                     ):
                         return item
                     summary, facts = await read_entry_page(response, word, source)
+                if hop and isinstance(facts, cambridge.CambridgeEntry):
+                    if not facts.matching_records():
+                        return item
+                    if not summary.casefold().startswith(f"{word.casefold()} definition:"):
+                        summary = ""
                 related = (
                     facts.related_entry(locator, summary) if isinstance(facts, EntryFacts) else None
                 )
