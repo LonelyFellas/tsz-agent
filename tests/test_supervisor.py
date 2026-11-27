@@ -1349,9 +1349,44 @@ async def test_youdao_uses_public_dictionary_rules_and_basic_entry(headword, rul
         assert (
             source.excerpt == "test · 英 [test] / 美 [test] · 词性 n.、v."
             " · [复数 tests 第三人称单数 tests 现在分词 testing 过去式 tested 过去分词 tested]"
+            " · 释义 n. Sample text · 释义 v. Sample text"
         )
     else:
         assert source.excerpt == ""
+
+
+async def test_youdao_returns_phrase_meaning_and_bilingual_examples_without_word_forms():
+    def respond(req):
+        if req.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        assert req.url.raw_path == b"/w/eng/warm%20welcome/"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            text="""
+                <div id="phrsListTab">
+                  <h2><span class="keyword">warm welcome</span>
+                    <span class="pronounce"><a title="发音"></a></span></h2>
+                  <div class="trans-container"><ul><li>热烈欢迎</li></ul></div>
+                </div>
+                <div id="bilingual"><ul class="ol"><li>
+                  <p><span>They gave us a </span><b>warm welcome</b><span>.</span></p>
+                  <p><span>他们</span><span>热情地欢迎了我们。</span></p>
+                  <p class="example-via">来源名称</p>
+                </li></ul></div>
+                <div id="authority"><p>Outside the bilingual examples.</p></div>
+            """,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        (source,) = await search_dictionaries(
+            "warm welcome", None, client, youdao_public_lookup=True, source_names=("有道",)
+        )
+
+    assert source.status == "found"
+    assert source.excerpt == (
+        "warm welcome · 释义 热烈欢迎 · 例句 They gave us a warm welcome. — 他们热情地欢迎了我们。"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1387,7 +1422,11 @@ def test_youdao_uses_matching_collins_forms_if_basic_entry_has_none(
         " · 例句证据 （柯林斯）They school them in safety." if collins_head == "school" else ""
     )
     assert (
-        reader.excerpt("school", "") == "school · 词性 n.、v." + expected_forms + expected_example
+        reader.excerpt("school", "")
+        == "school · 词性 n.、v."
+        + expected_forms
+        + expected_example
+        + " · 释义 n. School · 释义 v. Train"
     )
     assert reader.excerpt("schoolyard", "") == ""
 
