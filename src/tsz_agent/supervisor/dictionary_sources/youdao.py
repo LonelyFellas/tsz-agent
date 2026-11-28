@@ -21,7 +21,7 @@ class YoudaoSummary(HTMLParser):
         self._examples_depth: int | None = None
         self._grammar_examples: list[str] = []
         self._example_lines: list[str] | None = None
-        self._bilingual_examples: list[str] = []
+        self._bilingual_examples: list[tuple[str, ...]] = []
         self._field: tuple[str, str] | None = None
         self._field_depth = 0
         self._text: list[str] = []
@@ -116,7 +116,7 @@ class YoudaoSummary(HTMLParser):
             self._collins_heading = False
         if tag == "li" and self._section == "bilingual" and self._example_lines is not None:
             if self._example_lines:
-                self._bilingual_examples.append(" — ".join(self._example_lines))
+                self._bilingual_examples.append(tuple(self._example_lines))
             self._example_lines = None
         if tag == "div" and self._section:
             if self._div_depth == self._definitions_depth:
@@ -189,12 +189,18 @@ class YoudaoSummary(HTMLParser):
             " · ".join([self._headword, *(fact for fact in facts if fact)]) if any(facts) else ""
         )
         excerpt = append_grammar_evidence(excerpt[:1400], word, examples=self._grammar_examples)
-        for label, values in (("释义", self._definitions), ("例句", self._bilingual_examples)):
-            for value in dict.fromkeys(values):
-                field = f" · {label} {value.replace(' · ', ' — ')}"
-                base = excerpt or self._headword
-                if len(base) + len(field) <= 1400:
-                    excerpt = base + field
+        fields = [f"释义 {definition.replace(' · ', ' — ')}" for definition in self._definitions]
+        for example in self._bilingual_examples:
+            fields.append(
+                " · ".join(
+                    f"{label} {line.replace(' · ', ' — ')}"
+                    for label, line in zip(("例句原文", "例句译文"), example, strict=False)
+                )
+            )
+        for field in dict.fromkeys(fields):
+            candidate = f"{excerpt or self._headword} · {field}"
+            if len(candidate) <= 1400:
+                excerpt = candidate
         return excerpt
 
 
