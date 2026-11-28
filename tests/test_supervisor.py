@@ -1370,10 +1370,10 @@ async def test_youdao_returns_phrase_meaning_and_bilingual_examples_without_word
                   <div class="trans-container"><ul><li>热烈欢迎</li></ul></div>
                 </div>
                 <div id="bilingual"><ul class="ol"><li>
-                  <p><span>They gave us a </span><b>warm welcome</b><span>.</span></p>
+                  <p><span>They gave us a </span><b>warm welcome</b><span> — a pleasant surprise.</span></p>
                   <p><span>他们</span><span>热情地欢迎了我们。</span></p>
                   <p class="example-via">来源名称</p>
-                </li></ul></div>
+                </li><li><p>They waved.</p></li></ul></div>
                 <div id="authority"><p>Outside the bilingual examples.</p></div>
             """,
         )
@@ -1385,7 +1385,8 @@ async def test_youdao_returns_phrase_meaning_and_bilingual_examples_without_word
 
     assert source.status == "found"
     assert source.excerpt == (
-        "warm welcome · 释义 热烈欢迎 · 例句 They gave us a warm welcome. — 他们热情地欢迎了我们。"
+        "warm welcome · 释义 热烈欢迎 · 例句原文 They gave us a warm welcome — a pleasant surprise."
+        " · 例句译文 他们热情地欢迎了我们。 · 例句原文 They waved."
     )
 
 
