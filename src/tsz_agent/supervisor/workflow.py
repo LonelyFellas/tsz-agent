@@ -180,7 +180,7 @@ async def advance(
                 pending.state, pending.error = "failed", "missing_examples"
             else:
                 raw, receipt = await infer(settings, scope, section, view)
-                rows = validate_rows(section, raw, scope, view.proposals)
+                rows = validate_rows(section, raw, scope, view.proposals, view.sources)
                 if section == "dialect":
                     for row in rows:
                         marker = (
