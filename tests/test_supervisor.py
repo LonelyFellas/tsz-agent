@@ -50,6 +50,33 @@ def request(sections):
     )
 
 
+def test_phrase_forms_keep_valid_slots_and_discard_invalid_alternatives():
+    scope = request(["forms"]).scope
+    scope.headword = "wake up"
+    pos = "phrase_verbal_constituent"
+    past_type = "phrase_past_ten_4b4e1cb9f726aa3d"
+    scope.catalog = {pos: ["base", past_type]}
+
+    def form(form_type, spelling, phonetic):
+        variant = {"spelling": spelling, "dict_phonetic": phonetic}
+        return {"form_type": form_type, "is_regular": False, "uk": variant, "us": variant}
+
+    base = form("base", "wake up", "/weɪk ʌp/")
+    past = form(past_type, "woke up", "/wəʊk ʌp/")
+    other_past = form(past_type, "waked up", "/weɪkt ʌp/")
+    wrong_code = form("past_tense", "woke up", "/wəʊk ʌp/")
+
+    assert validate_rows(
+        "forms",
+        {"items": [{"pos": pos, "forms": [base, wrong_code, past, other_past]}]},
+        scope,
+        Proposals(),
+    ) == [{"pos": pos, "forms": [base, past]}]
+
+    with pytest.raises(ValueError, match="unknown_form"):
+        validate_rows("forms", {"items": [{"pos": pos, "forms": [past]}]}, scope, Proposals())
+
+
 def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
     scope = request(["grammar"]).scope
     scope.grammar_sub_pos = {
