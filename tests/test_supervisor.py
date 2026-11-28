@@ -77,6 +77,79 @@ def test_phrase_forms_keep_valid_slots_and_discard_invalid_alternatives():
         validate_rows("forms", {"items": [{"pos": pos, "forms": [past]}]}, scope, Proposals())
 
 
+def test_phrase_forms_fill_the_ing_pair_with_single_regional_dictionary_pronunciations():
+    scope = request(["forms"]).scope
+    scope.headword = "look after"
+    pos = "phrase_verbal_constituent"
+    participle = "phrase_present__ad0918ca2482087c"
+    gerund = "phrase_gerund_0d0a0dc6a62cb521"
+    scope.catalog = {pos: ["base", participle, gerund]}
+    base = {
+        "form_type": "base",
+        "is_regular": True,
+        "uk": {"spelling": "look after", "dict_phonetic": "lʊk ˈɑːftə(r)"},
+        "us": {"spelling": "look after", "dict_phonetic": "lʊk ˈæftə(r)"},
+    }
+    ing = {
+        "form_type": participle,
+        "is_regular": True,
+        "uk": {"spelling": "looking after", "dict_phonetic": "ˈlʊkɪŋ ˈɑːftə(r)"},
+        "us": {"spelling": "looking after", "dict_phonetic": "ˈlʊkɪŋ ˈæftər"},
+    }
+    rows = validate_rows(
+        "forms", {"items": [{"pos": pos, "forms": [base, ing]}]}, scope, Proposals()
+    )
+    forms = Proposals.model_validate({"forms": rows}).forms[0].forms
+    assert [form.form_type for form in forms] == ["base", participle, gerund]
+    assert forms[0].uk.dict_phonetic == "lʊk ˈɑːftə"
+    assert forms[0].us.dict_phonetic == "lʊk ˈæftər"
+    assert forms[1].uk == forms[2].uk
+    assert forms[1].us == forms[2].us
+
+
+def test_phrase_ignores_suggested_adjective_without_matching_dictionary_evidence():
+    scope = request(["forms"]).scope
+    scope.headword = "give up"
+    verb, adjective = "phrase_verbal_constituent", "phrase_adjectival_constituent"
+    scope.catalog = {verb: ["base"], adjective: ["base"]}
+    scope.existing_pos = [adjective]
+    pronunciation = {"spelling": "give up", "dict_phonetic": "ˌɡɪv ˈʌp"}
+    base = {"form_type": "base", "is_regular": True, "uk": pronunciation, "us": pronunciation}
+    raw = {"items": [{"pos": adjective, "forms": [base]}, {"pos": verb, "forms": [base]}]}
+    source = Material(
+        source="有道",
+        locator="https://dict.youdao.com/w/eng/give%20up/",
+        excerpt="give up · 词性 v. · 词义 放弃",
+        status="found",
+    )
+    assert [row["pos"] for row in validate_rows("forms", raw, scope, Proposals(), [source])] == [
+        verb
+    ]
+
+
+def test_forms_reject_unattested_comparisons_and_lexical_verb_negative_contractions():
+    scope = request(["forms"]).scope
+    scope.headword = "colour"
+    scope.catalog = {
+        "adjective": ["base", "superlative"],
+        "verb": ["base", "verb_negative_contraction"],
+    }
+
+    def form(code, spelling):
+        variant = {"spelling": spelling, "dict_phonetic": "ˈkʌlə"}
+        return {"form_type": code, "is_regular": True, "uk": variant, "us": variant}
+
+    base = form("base", "colour")
+    raw = {
+        "items": [
+            {"pos": "adjective", "forms": [base, form("superlative", "colourest")]},
+            {"pos": "verb", "forms": [base, form("verb_negative_contraction", "colourn't")]},
+        ]
+    }
+    rows = validate_rows("forms", raw, scope, Proposals())
+    assert rows == [{"pos": pos, "forms": [base]} for pos in ("adjective", "verb")]
+
+
 def test_grammar_keeps_only_sub_pos_from_the_current_basic_pos():
     scope = request(["grammar"]).scope
     scope.grammar_sub_pos = {

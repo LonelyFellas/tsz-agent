@@ -16,9 +16,10 @@ from pydantic import (
     field_validator,
 )
 
-from tsz_agent.form_candidates import CandidateForm, CandidatePos
+from tsz_agent.form_candidates import CandidatePos
 
 from .entry_facts import regular_s_form
+from .form_quality import keep_dictionary_forms, lists_adjective
 from .runtime import Execution
 
 Section = Literal[
@@ -227,7 +228,12 @@ AGENTS: dict[Section, SectionAgent] = {
         "短语可能使用带后缀的专用编码，即使含义相同，也不能用普通单词的词形编码替代。"
         "每个词性恰好一项 base，原形的英式或美式拼写须与 headword 相同。"
         "每种词形最多一项，存在多种写法或音标时，英式和美式各选一个常用形式放在同一项。"
-        "短语的变形拼写和音标都应保留整个短语。只有在无法对应目录编码时才省略非原形的词形。",
+        "每侧都给一个可独立朗读的完整 IPA，不用括号可选音、备选方案或空字段；拿不准可省略该候选。"
+        "短语的拼写和 IPA 均保留整个短语。动词同时填目录允许的三单、现在分词、动名词、过去式和过去分词；"
+        "现在分词和动名词即使拼写读音一样，也各填一项。"
+        "entry_pos 只说明草稿已有的分类，词性须独立核实。普通名词作定语、动词短语的分词用法不单列为形容词。"
+        "仅有名词或动词用法时不构造比较级、最高级；仅真正能与 not 缩写的助动词和情态动词填否定缩写。"
+        "名词和动词同形时分别判断重音，比如 record 的名词首音节重读，动词末音节重读。",
         8,
     ),
     "senses": SectionAgent(
@@ -361,7 +367,11 @@ def retain_grammar_sub_pos(row: Grammar, scope: Scope) -> None:
 
 
 def validate_rows(
-    section: Section, raw: object, scope: Scope, result: Proposals
+    section: Section,
+    raw: object,
+    scope: Scope,
+    result: Proposals,
+    sources: Sequence[Material] = (),
 ) -> list[dict[str, object]]:
     rows = AGENTS[section].parse(raw)
     senses = sense_list(scope, result)
@@ -370,6 +380,15 @@ def validate_rows(
     entry_pos = (
         set(scope.existing_pos) | {s.pos for s in scope.senses} | {p.pos for p in result.forms}
     )
+    candidate_positions = {row.pos for row in rows if isinstance(row, CandidatePos)}
+    reference_text = [
+        source.excerpt
+        for source in sources
+        if source.status == "found"
+        and source.excerpt.partition(" · ")[0].casefold() == scope.headword.casefold()
+    ]
+    accepted = []
+    seen_positions = set()
     for row in rows:
         if isinstance(row, (Sense, Grammar)) and row.pos not in entry_pos:
             raise ValueError("missing_form_pos")
@@ -394,12 +413,26 @@ def validate_rows(
                 base.us.spelling.casefold(),
             }:
                 raise ValueError("wrong_headword")
-            forms: dict[str, CandidateForm] = {}
-            for form in row.forms:
-                if form.form_type in allowed:
-                    forms.setdefault(form.form_type, form)
-            row.forms = list(forms.values())
-    return [row.model_dump() for row in rows]
+            if row.pos in seen_positions:
+                continue
+            if (
+                row.pos == "phrase_adjectival_constituent"
+                and "phrase_verbal_constituent" in candidate_positions
+                and not lists_adjective(reference_text)
+            ):
+                continue
+            row.forms = keep_dictionary_forms(
+                row,
+                allowed,
+                scope.headword,
+                reference_text,
+                also_noun_or_verb=bool(candidate_positions & {"noun", "verb"}),
+            )
+            if not any(form.form_type == "base" for form in row.forms):
+                continue
+            seen_positions.add(row.pos)
+        accepted.append(row.model_dump())
+    return accepted
 
 
 class View(Execution[Section]):
