@@ -16,7 +16,7 @@ from pydantic import (
     field_validator,
 )
 
-from tsz_agent.form_candidates import CandidatePos
+from tsz_agent.form_candidates import CandidateForm, CandidatePos
 
 from .entry_facts import regular_s_form
 from .runtime import Execution
@@ -222,7 +222,12 @@ OBJECT_COMPLEMENT_EXAMPLES: dict[str, tuple[str, ...]] = {
 AGENTS: dict[Section, SectionAgent] = {
     "forms": SectionAgent(
         CandidatePos,
-        "判断实际词性，按 catalog 提供常用词形、英美拼写和字典音标。每词性含一项 base。",
+        "判断实际词性，提供常用词形、英美拼写和字典音标。pos 必须是 catalog 中的键。"
+        "每个 form_type 必须逐字照抄该 pos 对应的 catalog 列表中的编码，保留前缀、下划线和后缀。"
+        "短语可能使用带后缀的专用编码，即使含义相同，也不能用普通单词的词形编码替代。"
+        "每个词性恰好一项 base，原形的英式或美式拼写须与 headword 相同。"
+        "每种词形最多一项，存在多种写法或音标时，英式和美式各选一个常用形式放在同一项。"
+        "短语的变形拼写和音标都应保留整个短语。只有在无法对应目录编码时才省略非原形的词形。",
         8,
     ),
     "senses": SectionAgent(
@@ -379,19 +384,21 @@ def validate_rows(
         if isinstance(row, Grammar):
             retain_grammar_sub_pos(row, scope)
         if isinstance(row, CandidatePos):
-            kinds = [f.form_type for f in row.forms]
-            if (
-                len(set(kinds)) != len(kinds)
-                or kinds.count("base") != 1
-                or not set(kinds) <= set(scope.catalog[row.pos])
-            ):
+            allowed = set(scope.catalog[row.pos])
+            base_forms = [form for form in row.forms if form.form_type == "base"]
+            if len(base_forms) != 1 or "base" not in allowed:
                 raise ValueError("unknown_form")
-            base = next(f for f in row.forms if f.form_type == "base")
+            (base,) = base_forms
             if scope.headword.casefold() not in {
                 base.uk.spelling.casefold(),
                 base.us.spelling.casefold(),
             }:
                 raise ValueError("wrong_headword")
+            forms: dict[str, CandidateForm] = {}
+            for form in row.forms:
+                if form.form_type in allowed:
+                    forms.setdefault(form.form_type, form)
+            row.forms = list(forms.values())
     return [row.model_dump() for row in rows]
 
 
